@@ -1,0 +1,41 @@
+# Local CLI identity only; this is NOT a hosted project reference.
+project_id = "golfpintheory-backend-local"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[db.seed]
+enabled = false
+
+[auth]
+enabled = true
+site_url = "golfpintheory://auth/callback"
+additional_redirect_urls = ["golfpintheory://auth/callback", "golfpintheory://auth/reset-password"]
+enable_signup = true
+enable_anonymous_sign_ins = false
+minimum_password_length = 8
+
+[auth.email]
+enable_signup = true
+enable_confirmations = true
+
+# Independent online user validation also remains inside both handlers.
+# Verify the target project's signing-key/gateway compatibility in staging.
+[functions.golf-data]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/golf-data/index.ts"
+
+[functions.delete-account]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/delete-account/index.ts"

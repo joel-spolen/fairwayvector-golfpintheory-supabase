@@ -1,0 +1,76 @@
+{
+    "sourceRepository": "fairwayvector-golfpintheory",
+    "capturedOn": "2026-10-24",
+    "algorithm": "sha256",
+    "copyPolicy": "content copied; whitespace normalized",
+    "normalization": "Split UTF-8 text on CRLF or LF, trimEnd each line, join with LF, then trimEnd the complete text. Leading indentation and internal whitespace are preserved.",
+    "hashPolicy": "sha256 records original source bytes at capture; normalizedSha256 verifies normalized source and destination content.",
+    "files": [
+        {
+            "source": "backend/migrations/202610190001_sync_foundation.sql",
+            "destination": "supabase/migrations/202610190001_sync_foundation.sql",
+            "sha256": "f4b0f42175897135ba80e921aa424e1c8173e0607673b0492700f12ed427277a",
+            "normalizedSha256": "f4b0f42175897135ba80e921aa424e1c8173e0607673b0492700f12ed427277a"
+        },
+        {
+            "source": "backend/migrations/202610210001_account_deletion.sql",
+            "destination": "supabase/migrations/202610210001_account_deletion.sql",
+            "sha256": "0a83cd67cbd82251cd286f391d63f99e02cc068d0754af31b64bf1b4d2b59f0a",
+            "normalizedSha256": "0a83cd67cbd82251cd286f391d63f99e02cc068d0754af31b64bf1b4d2b59f0a"
+        },
+        {
+            "source": "backend/migrations/202610230001_sync_domain_validation.sql",
+            "destination": "supabase/migrations/202610230001_sync_domain_validation.sql",
+            "sha256": "a720e25aaa6e45b00072fd060a00b8dee3432911a9cb500ed0cd6930fb8d1c06",
+            "normalizedSha256": "4cf531c9833a7c2161bf4a70761d68c7639286a62426b332edf81f6926dbf251"
+        },
+        {
+            "source": "backend/migrations/202610240001_admin_account_metrics.sql",
+            "destination": "supabase/migrations/202610240001_admin_account_metrics.sql",
+            "sha256": "96a3096a09752c8d86afc9367131183e6abe00f89f3e2e91d434f1875f8aeba9",
+            "normalizedSha256": "96a3096a09752c8d86afc9367131183e6abe00f89f3e2e91d434f1875f8aeba9"
+        },
+        {
+            "source": "backend/tests/account_deletion_regression.sql",
+            "destination": "tests/sql/account_deletion_regression.sql",
+            "sha256": "2c83cc22fb72fab9f34736a7c9b277ef4ac23fcba9e35165dc04195851a3af27",
+            "normalizedSha256": "2c83cc22fb72fab9f34736a7c9b277ef4ac23fcba9e35165dc04195851a3af27"
+        },
+        {
+            "source": "backend/tests/admin_account_metrics_regression.sql",
+            "destination": "tests/sql/admin_account_metrics_regression.sql",
+            "sha256": "0f18355ea87b936832a6bfcb1b02a4010fe9a41faac9b09b20d9ef3bd1c92e3b",
+            "normalizedSha256": "0f18355ea87b936832a6bfcb1b02a4010fe9a41faac9b09b20d9ef3bd1c92e3b"
+        },
+        {
+            "source": "backend/tests/concurrency_regression.sql",
+            "destination": "tests/sql/concurrency_regression.sql",
+            "sha256": "034b80994bf188f27f1c9e9813a4077a0ef3339ceff7d467e98f11d8027df30b",
+            "normalizedSha256": "034b80994bf188f27f1c9e9813a4077a0ef3339ceff7d467e98f11d8027df30b"
+        },
+        {
+            "source": "backend/tests/domain_payload_regression.sql",
+            "destination": "tests/sql/domain_payload_regression.sql",
+            "sha256": "448276fc2746edb1994b64c29bbf3c0113bc8e6c4f069fe1ad8f6cb3f52ac0ae",
+            "normalizedSha256": "54f5a84fcec3d0dd3dfa7a8551391affc6c3264a2ccc43068c02c32055b01067"
+        },
+        {
+            "source": "backend/tests/security_regression.sql",
+            "destination": "tests/sql/security_regression.sql",
+            "sha256": "d498e600f41367c14915b73a0827095a8315715fefe09c58fb62faa0e142c598",
+            "normalizedSha256": "d498e600f41367c14915b73a0827095a8315715fefe09c58fb62faa0e142c598"
+        },
+        {
+            "source": "supabase/functions/delete-account/index.ts",
+            "destination": "supabase/functions/delete-account/index.ts",
+            "sha256": "63c4864f54665f53cdb612b583330874699a0b8574315964d42a08a866bbdf36",
+            "normalizedSha256": "63c4864f54665f53cdb612b583330874699a0b8574315964d42a08a866bbdf36"
+        },
+        {
+            "source": "backend/CONTRACT.md",
+            "destination": "docs/sync-contract.md",
+            "sha256": "dcc179b276bed45c7e77c172a4b2694a7490f2db89337fa06d64109449358c31",
+            "normalizedSha256": "aac2e7c51328d71240e5324980473775f38418571a7914a089bf30f3e971b78f"
+        }
+    ]
+}

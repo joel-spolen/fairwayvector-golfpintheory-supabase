@@ -1,0 +1,35 @@
+# Dependencies, generated artifacts and editor state
+node_modules/
+coverage/
+.DS_Store
+*.log
+*.swp
+*.swo
+.vscode/
+
+# Secrets: only the reviewed placeholder example is publishable
+.env
+.env.*
+!.env.example
+*.local.*
+*.pem
+*.p8
+*.key
+*.p12
+*.mobileprovision
+
+# Supabase local/linked state; never commit a real project reference
+supabase/.temp/
+supabase/.branches/
+.supabase/
+
+# Private operational material and database/provider exports
+operations/
+recovery/
+exports/
+backups/
+data/
+*.dump
+*.backup
+*.sqlite*
+*.db

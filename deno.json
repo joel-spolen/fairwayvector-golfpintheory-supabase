@@ -1,0 +1,10 @@
+{
+    "tasks": {
+        "check": "deno check supabase/functions/golf-data/index.ts supabase/functions/delete-account/index.ts"
+    },
+    "compilerOptions": {
+        "checkJs": false
+    },
+    "nodeModulesDir": "none",
+    "lock": false
+}
