@@ -1,3 +1,15 @@
+### Trajectory bag/profile sync
+
+The iOS client also syncs the account's trajectory club bag and personal club
+carry/launch overrides through `club_profile`. Apply
+`supabase/migrations/202610250001_sync_club_profile.sql` after
+`202610230001_sync_domain_validation.sql`. This migration advances the strict
+sync capability response to payload validation version 2. Updated clients check
+that version before any sync traffic and stop without uploading if it is absent.
+Run `tests/sql/club_profile_sync_regression.sql` in the local disposable database
+and then in disposable staging after migration. Do not edit an applied migration;
+use a reviewed forward-only migration for subsequent DTO changes.
+
 # Golf PinTheory — Supabase backend source
 
 Standalone deployment source for account sync, account deletion, service-only
