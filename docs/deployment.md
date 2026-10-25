@@ -39,8 +39,11 @@ preflight is a blocker, not permission to delete history. See [testing](testing.
 Hosted runtimes supply `SUPABASE_URL`, `SUPABASE_ANON_KEY` and
 `SUPABASE_SERVICE_ROLE_KEY`; do not create redundant custom `SUPABASE_` secrets.
 Provider `GOLF_API_KEY`/`GPXZ_API_KEY` values belong only in the selected project's
-Edge secrets, entered by the operator. Never upload the local example as-is or
-put service-role credentials in mobile/browser code. Optional
+Edge secrets, entered by the operator. The ignored local transfer file
+`supabase/functions/.env.local` is excluded from Git and the app bundle; replace
+its values with newly rotated keys before use. Apply them to the chosen project
+with Supabase CLI `secrets set --env-file`. Never commit this file or put provider
+or service-role credentials in mobile/browser code. Optional
 `CORS_ALLOWED_ORIGIN` permits one exact browser origin for deletion; the native
 golf-data endpoint independently rejects browser Origins.
 
@@ -77,9 +80,16 @@ reviewers on the production environment so the live database change pauses for
 approval; the workflow reference alone does not enforce approval. It fails closed
 unless the three production secrets and `MIGRATION_LEDGER_RECONCILED=true` are
 configured. `supabase db push` applies all migrations pending in the configured
-project, not just the file changed in that push. This workflow does not deploy
-Edge Functions. Keep the production environment restricted to the protected
+project, not just the file changed in that push. Keep the production environment restricted to the protected
 `main` branch and require review for workflow and migration changes.
+
+The separate [`auto-deploy-golf-data.yml`](../.github/workflows/auto-deploy-golf-data.yml)
+workflow deploys only the authenticated `golf-data` Edge Function when its handler,
+shared modules, or Supabase config change on `main`. It requires the production
+access-token/project-ref secrets and protected `production` environment, but does
+not run database migrations or upload provider secrets. Store `GOLF_API_KEY` and
+`GPXZ_API_KEY` in the selected Supabase project's Edge Function secrets, out of
+band from GitHub Actions.
 
 ## 4. Manual release
 
@@ -116,9 +126,9 @@ does not prove the mobile user's token is accepted.
 
 ## 5. Hosted Supabase GitHub integration is separate
 
-The GitHub Actions migration workflow above applies migrations on protected
-`main` pushes; it does not connect Supabase's hosted GitHub integration, create
-preview branches or deploy functions. If an operator also enables Supabase's
+The GitHub Actions workflow above applies migrations and deploys `golf-data` for
+relevant protected `main` pushes; it does not connect Supabase's hosted GitHub
+integration or create preview branches. If an operator also enables Supabase's
 hosted integration, explicitly configure repository access, project,
 production/preview branch mapping, repository root and migration/function policy.
 GitHub Environment approvals do not automatically govern that integration. Pick

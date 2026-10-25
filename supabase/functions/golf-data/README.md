@@ -1,9 +1,10 @@
 # golf-data Edge function
 
-Implementation only; no deployment, SQL, provider calls, local admin, iOS, or
-GitHub workflow changes are included. The repository-level package manifest only
-sets ESM/Node >=22 and the offline `npm test` script. No dependencies or lockfile
-are needed. Parent integration owns Supabase/Deno configuration and CI wiring.
+This authenticated Edge Function is the only app route to GolfAPI/GPXZ. No provider
+credential or upstream provider URL belongs in the iOS app. The repository-level
+package manifest sets ESM/Node >=22 and the offline `npm test` script. No
+dependencies or lockfile are needed. The parent repository owns Supabase/Deno
+configuration and deployment.
 
 ## Runtime and credentials
 
@@ -12,6 +13,10 @@ are needed. Parent integration owns Supabase/Deno configuration and CI wiring.
 - Platform environment: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and
   `SUPABASE_SERVICE_ROLE_KEY`. Provider secrets: `GOLF_API_KEY`, `GPXZ_API_KEY`.
   Never put provider or service keys in clients or SQL settings.
+- The ignored local-only `supabase/functions/.env.local` can be supplied to
+  `supabase secrets set --env-file ... --project-ref ...`. Rotate any keys that
+  appeared in diagnostics before setting them. Do not commit the file or use it
+  as an Xcode configuration input.
 - Authentication calls the fixed project's `/auth/v1/user` online with the anon
   apikey and the supplied user bearer. It requires a UUID and explicit
   `is_anonymous: false`; it never decodes a JWT locally. Shared/admin/public keys

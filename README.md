@@ -40,7 +40,9 @@ The app is not switched to this data endpoint by this work.
 - [shared cache migration](supabase/migrations/202610240002_shared_data_cache.sql):
   the new forward migration for hosted cache coordination, budgets and admin reports.
 - [golf-data entry point](supabase/functions/golf-data/index.ts) and existing
-  shared modules; [delete-account entry point](supabase/functions/delete-account/index.ts).
+  shared modules proxy authenticated iOS course/elevation requests; provider API
+  credentials are Supabase Edge Function secrets, never app configuration.
+  [delete-account entry point](supabase/functions/delete-account/index.ts).
 - [sync contract](docs/sync-contract.md), [public Auth setup](docs/auth-setup.md),
   [source provenance](docs/source-provenance.md), [validation](docs/testing.md),
   [deployment runbook](docs/deployment.md), [completion state and executed checks](docs/scaffold-status.md).
@@ -94,7 +96,12 @@ through reviewed forward SQL, and reconcile the ledger first. Do not drop tables
 replay `CREATE` migrations, rename IDs or mark unapplied SQL as applied to make a
 push succeed. See [docs/deployment.md](docs/deployment.md).
 
-The [manual workflow](.github/workflows/deploy.yml) offers `staging` or
+The [automatic migration workflow](.github/workflows/auto-migrate-production.yml)
+applies pending SQL migrations on relevant `main` pushes. The separate
+[Edge Function workflow](.github/workflows/auto-deploy-golf-data.yml) deploys
+`golf-data` when its source changes. Configure production environment secrets and
+reviewer protections. Provider keys remain Supabase Edge Function secrets; neither
+workflow reads or uploads a provider key file. The [manual workflow](.github/workflows/deploy.yml) offers `staging` or
 `production`, uses GitHub Environment secrets, and requires explicit migration
 reconciliation. Configure **required reviewers, prevent self-approval, and
 deployment branch protection** for both environments before using it. YAML alone
