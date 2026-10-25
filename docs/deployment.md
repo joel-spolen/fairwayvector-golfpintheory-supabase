@@ -53,7 +53,7 @@ Configure email/Google/approved Apple flow and the exact mobile callback allowli
 using [public Auth setup](auth-setup.md). Local CLI Auth config does not update a
 hosted dashboard's provider credentials, SMTP or redirect allowlist.
 
-## 3. Protect GitHub environments before first dispatch
+## 3. Protect GitHub environments before deployment
 
 Create `staging` and `production` GitHub Environments. For **both**, configure
 required reviewers, prevent self-approval, restrict deployments to the protected
@@ -64,9 +64,22 @@ create approval protection**; do not dispatch if enforcement is unavailable.
 Each environment needs secrets `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_REF`
 and `SUPABASE_DB_PASSWORD`, scoped to its own target. Do not paste their values
 into repository files, chat, job inputs or logs. Use appropriately restricted
-operator access. After verifying this commit against the target, set environment
-variable `MIGRATION_LEDGER_RECONCILED` to `true`. Re-review and revoke/reset this
-flag on schema/history changes; it is an operator assertion, not automated proof.
+operator access. After verifying the target's applied SQL and migration ledger
+against the repository, set environment variable `MIGRATION_LEDGER_RECONCILED` to
+`true`. Re-review and revoke/reset this flag on schema/history changes; it is an
+operator assertion, not automated proof.
+
+The `production` environment is also used by
+[`auto-migrate-production.yml`](../.github/workflows/auto-migrate-production.yml).
+It starts on a push to `main` that changes `supabase/migrations/**`, previews the
+pending migration plan, then applies pending migrations. Configure required
+reviewers on the production environment so the live database change pauses for
+approval; the workflow reference alone does not enforce approval. It fails closed
+unless the three production secrets and `MIGRATION_LEDGER_RECONCILED=true` are
+configured. `supabase db push` applies all migrations pending in the configured
+project, not just the file changed in that push. This workflow does not deploy
+Edge Functions. Keep the production environment restricted to the protected
+`main` branch and require review for workflow and migration changes.
 
 ## 4. Manual release
 
@@ -103,16 +116,15 @@ does not prove the mobile user's token is accepted.
 
 ## 5. Hosted Supabase GitHub integration is separate
 
-Creating this repository/workflows does not connect Supabase to GitHub, create
-preview branches or enable automatic migration/function releases. There is no
-automatic deploy-on-push in these workflows. If an operator chooses Supabase's
-hosted integration later, explicitly configure repository access, project,
+The GitHub Actions migration workflow above applies migrations on protected
+`main` pushes; it does not connect Supabase's hosted GitHub integration, create
+preview branches or deploy functions. If an operator also enables Supabase's
+hosted integration, explicitly configure repository access, project,
 production/preview branch mapping, repository root and migration/function policy.
-Review that integration's actual deployment behavior and protect its release
-path; GitHub Environment approvals in this workflow do not automatically govern
-another service's integration. Pick one release authority per target so two
-systems cannot race or bypass approvals. Never assume Edge functions or Auth
-settings are automatically deployed by enabling a database integration.
+GitHub Environment approvals do not automatically govern that integration. Pick
+one migration release authority per target so two systems cannot race or bypass
+approvals. Never assume Edge functions or Auth settings are automatically
+deployed by enabling a database integration.
 
 ## Remaining release blockers
 
