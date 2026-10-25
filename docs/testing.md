@@ -26,7 +26,7 @@ PostgreSQL without an explicit reviewed Auth fixture is not equivalent. Do not
 point any of these tests at production. Some take table locks, TRUNCATE cache
 tables or commit setup fixtures. Never disable history triggers to force a pass.
 
-1. Review and apply the five migrations in filename order on a fresh database.
+1. Review and apply all migrations in filename order on a fresh database.
    Local Supabase CLI needs its normal local container runtime. Any local reset
    is destructive and must explicitly target only the disposable local instance,
    never a linked remote. There is deliberately no automatic remote SQL test job.
@@ -36,7 +36,10 @@ tables or commit setup fixtures. Never disable history triggers to force a pass.
    [deletion](../tests/sql/account_deletion_regression.sql),
    [domain](../tests/sql/domain_payload_regression.sql),
    [metrics](../tests/sql/admin_account_metrics_regression.sql), and
-   [shared cache](../tests/shared_data_cache.sql). Do not loop over every SQL file:
+   [shared cache](../tests/shared_data_cache.sql),
+   [club profile](../tests/sql/club_profile_sync_regression.sql), and
+   [club profile timestamp](../tests/sql/club_profile_lww_regression.sql).
+   Do not loop over every SQL file:
    the concurrency script is explicitly **not** a single-session executable.
 3. Execute [concurrency sections](../tests/sql/concurrency_regression.sql) in
    independent connections, following its labels and variants. Cache concurrency

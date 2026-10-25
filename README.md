@@ -1,14 +1,18 @@
 ### Trajectory bag/profile sync
 
-The iOS client also syncs the account's trajectory club bag and personal club
-carry/launch overrides through `club_profile`. Apply
-`supabase/migrations/202610250001_sync_club_profile.sql` after
-`202610230001_sync_domain_validation.sql`. This migration advances the strict
-sync capability response to payload validation version 2. Updated clients check
-that version before any sync traffic and stop without uploading if it is absent.
-Run `tests/sql/club_profile_sync_regression.sql` in the local disposable database
-and then in disposable staging after migration. Do not edit an applied migration;
-use a reviewed forward-only migration for subsequent DTO changes.
+The iOS client syncs the trajectory club bag and personal club carry/launch
+overrides through `club_profile`, plus wedge inventory/carry records. Bag editor
+changes are drafts until Save. Each saved profile or wedge record carries a
+client edit timestamp; on a same-record conflict the later timestamp wins (the
+server wins ties), then retries against the current server revision. This is
+last-edit-wins for these bag records, not a merge of simultaneous field edits.
+Apply `202610250001_sync_club_profile.sql`, then
+`202610250002_club_profile_lww.sql`, after
+`202610230001_sync_domain_validation.sql`. The latter migration advances strict
+payload validation to version 3. Updated clients stop before sync if that
+capability is absent. Run the club-profile and club-profile timestamp SQL
+regressions in a disposable database, then disposable staging. Do not edit an
+applied migration; use reviewed forward-only migrations for subsequent DTO changes.
 
 # Golf PinTheory — Supabase backend source
 

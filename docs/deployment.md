@@ -7,10 +7,10 @@ operational records separate.
 
 ## 1. Reconcile existing migration history first
 
-The copied migration IDs are `202610190001`, `202610210001`, `202610230001`,
-`202610240001`; the existing cache ID is `202610240002`. Keep the original
-filenames/order. They contain non-idempotent CREATE statements and must not be
-blindly replayed on a populated project.
+The migration sequence currently ends with `202610250001_sync_club_profile.sql`
+and `202610250002_club_profile_lww.sql`, following the original account/cache
+migrations. Keep filenames/order. Earlier migrations contain non-idempotent
+CREATE statements and must not be blindly replayed on a populated project.
 
 Before **any** linked push, an operator must compare the target's migration ledger
 with exact applied schema/function/trigger/ACL definitions and the captured source
