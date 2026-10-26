@@ -47,10 +47,13 @@ or service-role credentials in mobile/browser code. Optional
 `CORS_ALLOWED_ORIGIN` permits one exact browser origin for deletion; the native
 golf-data endpoint independently rejects browser Origins.
 
-Both SQL provider settings start disabled. Keep them disabled during migration,
-auth and offline cache validation. Enabling acquisition needs separate approval,
-licensing review, budget/cooldown checks, spend monitoring and valid provider keys.
-No workflow step enables providers or performs paid smoke calls.
+Both SQL provider settings initially default to disabled. The user-approved
+`202610260001_enable_golf_data.sql` forward migration enables `golf` acquisition
+for course search/download only; it does not enable GPXZ, increase daily limits,
+reset usage, clear cooldowns or override ambiguous jobs. Applying this migration
+permits billed provider requests for cache misses, so review it with the normal
+release plan. A valid `GOLF_API_KEY` Edge secret and deployed `golf-data` are also
+required. No validation command or workflow performs paid smoke calls.
 
 Configure email/Google/approved Apple flow and the exact mobile callback allowlist
 using [public Auth setup](auth-setup.md). Local CLI Auth config does not update a

@@ -159,6 +159,49 @@ test('HIT returns original body/timestamps/version, SQL account gates even hits'
   await errorCode(await fixture({ claim: { status: 'FORBIDDEN', body } }).handler(request()), 403, 'forbidden');
 });
 
+test('zero-result searches persist through finish and are shared across users without another provider call', async () => {
+  const cache = new Map();
+  let acquisitions = 0;
+  const handler = createHandler({
+    authenticate: async token => ({ id: token === 'second-user'
+      ? '24000002-0000-4000-8000-000000000099' : UID }),
+    providers: {
+      configured: { golf: true, gpxz: false },
+      async golf() {
+        acquisitions++;
+        return { body: validateGolf({ clubs: [], numClubs: 0 }, 'clubs') };
+      }
+    },
+    rpc: async (name, args) => {
+      if (name === 'pintheory_data_claim') {
+        assert.equal(args.p_max_age_seconds, null);
+        return cache.has(args.p_key) ? hit(cache.get(args.p_key)) : { status: 'CLAIMED', token: TOKEN };
+      }
+      assert.equal(name, 'pintheory_data_finish');
+      cache.set(args.p_key, args.p_body);
+      return true;
+    }
+  });
+  const query = '/api/v1/golf/clubs?country=Sweden&name=misspelled-course';
+  const first = await handler(request(query));
+  assert.equal(first.headers.get('x-cache'), 'MISS');
+  assert.deepEqual((await first.json()).clubs, []);
+  const repeat = await handler(request(query, { headers: { Authorization: 'Bearer second-user' } }));
+  assert.equal(repeat.headers.get('x-cache'), 'HIT');
+  assert.deepEqual((await repeat.json()).clubs, []);
+  assert.equal(acquisitions, 1);
+  await handler(request('/api/v1/golf/clubs?country=Sweden&name=different-misspelling'));
+  assert.equal(acquisitions, 2, 'distinct spellings are not interchangeable searches');
+});
+
+test('provider failure is not cached as a successful empty search', async () => {
+  const f = fixture({ claim: { status: 'CLAIMED', token: TOKEN }, providers: {
+    async golf() { throw new APIError(502, 'provider_unavailable', 'Provider could not complete the request.'); }
+  } });
+  await errorCode(await f.handler(request('/api/v1/golf/clubs?name=unknown')), 502, 'provider_unavailable');
+  assert.ok(!f.calls.some(([name]) => name === 'pintheory_data_finish'));
+});
+
 test('claim outcomes never dispatch; PENDING fixed retry=2; UNKNOWN requires operator', async () => {
   for (const [status, http, code] of [
     ['FORBIDDEN', 403, 'forbidden'], ['RATE_LIMIT', 429, 'rate_limit'],

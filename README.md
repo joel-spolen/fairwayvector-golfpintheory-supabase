@@ -76,8 +76,14 @@ Hosted Supabase provides `SUPABASE_URL`, `SUPABASE_ANON_KEY` and
 Edge secrets, never SQL rows, mobile clients, browser code or this repository.
 [supabase/functions/.env.example](supabase/functions/.env.example) is a local-only
 placeholder reference. Leave providers unconfigured for offline work; both
-`pintheory_data.settings.enabled` defaults are **false**. A key alone is not
-permission to enable paid acquisition.
+`pintheory_data.settings.enabled` defaults are **false**. The explicitly approved
+[GolfAPI activation migration](supabase/migrations/202610260001_enable_golf_data.sql)
+enables only `golf`, preserving budgets/cooldowns/usage and leaving GPXZ unchanged.
+Ordinary searches are stored across users, including zero results, without
+automatic expiry. Distinct spellings and filters require separate first lookups;
+provider failures are never stored as successful empty searches. A key alone does
+not activate acquisition. Negative-cache regression:
+[tests/sql/search_negative_cache_regression.sql](tests/sql/search_negative_cache_regression.sql).
 
 Keep `pintheory_sync`, `pintheory_admin` and `pintheory_data` out of Data API and
 Realtime exposure. User identity is verified online independently inside each
