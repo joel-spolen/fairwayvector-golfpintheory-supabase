@@ -509,6 +509,35 @@ test('real Providers exact fixed GolfAPI2.3 bearer/query formats and credit reda
   assert.equal(calls, 1);
 });
 
+test('unnamed course details are committed unchanged and reused without another provider send', async () => {
+  const id = '012141519740780123824';
+  const body = { courseID: id, courseName: '', clubName: 'Fixture Club', numHoles: '18' };
+  let sends = 0;
+  let cached;
+  const handler = createHandler({ authenticate: async () => ({ id: UID }),
+    providers: realProviders(async () => { sends++; return json({ ...body, apiRequestsLeft: 99 }); }),
+    rpc: async (name, args) => {
+      assert.equal(args.p_key, `golf:v1:detail:${id}`);
+      if (name === 'pintheory_data_claim') return cached
+        ? { status: 'HIT', body: cached } : { status: 'CLAIMED', token: TOKEN };
+      assert.equal(name, 'pintheory_data_finish');
+      assert.deepEqual(args.p_body, body);
+      cached = args.p_body;
+      return true;
+    } });
+  for (let i = 0; i < 2; i++) {
+    const res = await handler(request(`/api/v1/golf/courses/${id}`));
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), body);
+  }
+  assert.equal(sends, 1);
+  for (const courseName of [undefined, null, {}, 123]) {
+    assert.throws(() => validateGolf({ ...body, courseName }, 'detail', id),
+      { code: 'invalid_provider_response' });
+  }
+  assert.throws(() => validateGolf(body, 'detail', id.slice(1)), { code: 'invalid_provider_response' });
+});
+
 test('real Providers GPXZ fixed form uses original vertices (not resampled), validates exact output', async () => {
   const profile = profileRequest(sample);
   const expected = elevation(profile);

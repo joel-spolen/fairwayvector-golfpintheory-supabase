@@ -22,7 +22,9 @@ export function validateGolf(body, kind, id) {
     }
   } else {
     if (!text(body.courseID) || String(body.courseID) !== id) invalid();
-    if (kind === 'detail' && !text(body.courseName)) invalid();
+    // GolfAPI can leave a single-course club's course name empty. Preserve the
+    // provider body; clients supply a display-name fallback, not a new identity.
+    if (kind === 'detail' && typeof body.courseName !== 'string') invalid();
     if (kind === 'coordinates') {
       if (!Array.isArray(body.coordinates) || body.coordinates.length === 0) invalid();
       for (const point of body.coordinates) {
