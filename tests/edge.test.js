@@ -112,7 +112,7 @@ test('catalog search is authenticated, paged, no-store, and never invokes GolfAP
   const f = fixture({ rpcImpl: async (name, args) => {
     assert.equal(name, 'pintheory_catalog_search');
     assert.deepEqual(args, { p_user_id: UID, p_query: 'Åre', p_country: 'Sweden',
-      p_state: 'Jämtland', p_page: 2, p_page_size: 10 });
+      p_state: 'Jämtland', p_countries: [], p_page: 2, p_page_size: 10 });
     return catalogPage;
   } });
   const res = await f.handler(request('/api/v1/catalog/clubs?q=%20A%CC%8Are%20&country=Sweden&state=J%C3%A4mtland&page=2&pageSize=10'));
@@ -123,6 +123,19 @@ test('catalog search is authenticated, paged, no-store, and never invokes GolfAP
   assert.deepEqual(await res.json(), catalogPage);
   assert.deepEqual(f.calls.map(([name]) => name), ['pintheory_catalog_search']);
   assert.equal(f.sends.length, 0);
+});
+
+test('catalog region country set is forwarded as an exact bounded filter', async () => {
+  const f = fixture({ rpcImpl: async (name, args) => {
+    assert.equal(name, 'pintheory_catalog_search');
+    assert.deepEqual(args.p_countries, ['USA', 'Canada', 'Mexico']);
+    assert.equal(args.p_query, 'Pebble Be');
+    return { datasetVersion: 'catalog-v1', clubs: [], numClubs: 0,
+      numAllClubs: 0, page: 1, pageSize: 50, hasMore: false };
+  } });
+  const res = await f.handler(request('/api/v1/catalog/clubs?q=Pebble%20Be&countries=USA%7CCanada%7CMexico'));
+  assert.equal(res.status, 200);
+  assert.deepEqual(f.calls.map(([name]) => name), ['pintheory_catalog_search']);
 });
 
 test('catalog query accepts 200 characters and rejects longer input', async () => {
@@ -144,6 +157,8 @@ test('catalog search rejects malformed/oversized filters before RPC and gates in
     ['/api/v1/catalog/clubs?page=0', 'invalid_request'],
     ['/api/v1/catalog/clubs?pageSize=51', 'invalid_request'],
     ['/api/v1/catalog/clubs?q=A&q=B', 'invalid_request'],
+    ['/api/v1/catalog/clubs?country=USA&countries=USA%7CCanada', 'invalid_request'],
+    ['/api/v1/catalog/clubs?countries=USA%7C%7CCanada', 'invalid_request'],
     ['/api/v1/catalog/clubs?unknown=x', 'invalid_request'],
     [`/api/v1/catalog/clubs?q=${encodeURIComponent('x'.repeat(201))}`, 'invalid_request'],
     ['/api/v1/catalog/clubs?page=1&pageSize=50', 'search_required'],
@@ -620,12 +635,12 @@ test('catalog search is the only added fixed Supabase RPC with service credentia
       calls++;
       assert.equal(url, `${URL_ROOT}/rest/v1/rpc/pintheory_catalog_search`);
       assert.equal(options.method, 'POST');
-      assert.equal(options.body, '{"p_user_id":"user","p_query":"A","p_country":"Sweden","p_state":"","p_page":1,"p_page_size":50}');
+      assert.equal(options.body, '{"p_user_id":"user","p_query":"A","p_country":"Sweden","p_state":"","p_countries":[],"p_page":1,"p_page_size":50}');
       return json({ clubs: [], numClubs: 0, numAllClubs: 0, page: 1, pageSize: 50, hasMore: false, datasetVersion: 'v1' });
     }
   });
   assert.equal((await client.rpc('pintheory_catalog_search', { p_user_id: 'user', p_query: 'A',
-    p_country: 'Sweden', p_state: '', p_page: 1, p_page_size: 50 })).numAllClubs, 0);
+    p_country: 'Sweden', p_state: '', p_countries: [], p_page: 1, p_page_size: 50 })).numAllClubs, 0);
   await assert.rejects(client.rpc('pintheory_catalog_import_chunk', {}), { statusCode: 503 });
   assert.equal(calls, 1);
 });

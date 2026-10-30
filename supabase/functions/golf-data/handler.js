@@ -70,13 +70,13 @@ async function route(request) {
     throw new APIError(405, 'method_not_allowed', 'Method not allowed.');
   }
   if (catalogSearch) {
-    const raw = parameters(url.searchParams, ['q', 'country', 'state', 'page', 'pageSize']);
+    const raw = parameters(url.searchParams, ['q', 'country', 'state', 'countries', 'page', 'pageSize']);
     const query = {};
     let hasQuery = false;
     let hasCountry = false;
     let hasState = false;
     for (const [key, value] of Object.entries(raw)) {
-      const max = { q: 200, country: 120, state: 120, page: 4, pageSize: 2 }[key];
+      const max = { q: 200, country: 120, state: 120, countries: 6000, page: 4, pageSize: 2 }[key];
       if ([...value].length > max || key === 'page' && !/^[1-9][0-9]{0,3}$/.test(value)
           || key === 'pageSize' && !/^(?:[1-9]|[1-4][0-9]|50)$/.test(value)) invalid();
       const normalized = value.trim().normalize('NFC');
@@ -87,12 +87,16 @@ async function route(request) {
         if (key === 'state') hasState = true;
       }
     }
-    if (!hasQuery && !hasCountry && !hasState) {
+    const countries = query.countries ? query.countries.split('|').map(country => country.trim().normalize('NFC')) : [];
+    if (countries.length > 100 || countries.some(country => !country || [...country].length > 120)
+        || new Set(countries.map(country => country.toLocaleLowerCase('en-US'))).size !== countries.length
+        || query.country && countries.length) invalid();
+    if (!hasQuery && !hasCountry && !hasState && countries.length === 0) {
       throw new APIError(400, 'search_required', 'Supply a club name, country or state.');
     }
     query.page ??= '1';
     query.pageSize ??= '50';
-    return { kind: 'catalog-search', query };
+    return { kind: 'catalog-search', query, countries };
   }
   if (search) {
     const raw = parameters(url.searchParams, ['country', 'state', 'name', 'page', 'timestampUpdated']);
@@ -182,6 +186,7 @@ export function createHandler({ authenticate, rpc, providers }) {
           p_query: operation.query.q ?? '',
           p_country: operation.query.country ?? '',
           p_state: operation.query.state ?? '',
+          p_countries: operation.countries,
           p_page: Number(operation.query.page),
           p_page_size: Number(operation.query.pageSize)
         });

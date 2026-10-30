@@ -8,8 +8,10 @@ operational records separate.
 ## 1. Reconcile existing migration history first
 
 The migration sequence currently includes `202610300001_private_club_catalog_import.sql`,
-`202610300002_catalog_search.sql`, and `202610300003_catalog_search_query_limit.sql`
-after the sync/account/cache migrations. Keep filenames/order. Earlier migrations contain non-idempotent
+`202610300002_catalog_search.sql`, `202610300003_catalog_search_query_limit.sql`,
+`202610300004_catalog_search_matching_courses.sql`, and
+`202610300005_catalog_club_name_only_search.sql` after the sync/account/cache
+migrations. Keep filenames/order. Earlier migrations contain non-idempotent
 CREATE statements and must not be blindly replayed on a populated project.
 
 Before **any** linked push, an operator must compare the target's migration ledger

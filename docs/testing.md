@@ -40,7 +40,8 @@ tables or commit setup fixtures. Never disable history triggers to force a pass.
    [club profile](../tests/sql/club_profile_sync_regression.sql), and
    [club profile timestamp](../tests/sql/club_profile_lww_regression.sql),
    [private catalog import](../tests/sql/catalog_import_regression.sql), and
-   [catalog search](../tests/sql/catalog_search_regression.sql).
+   [catalog search](../tests/sql/catalog_search_regression.sql) after applying all
+   catalog migrations through `202610300005_catalog_club_name_only_search.sql`.
    Do not loop over every SQL file:
    the concurrency script is explicitly **not** a single-session executable.
 3. Execute [concurrency sections](../tests/sql/concurrency_regression.sql) in
