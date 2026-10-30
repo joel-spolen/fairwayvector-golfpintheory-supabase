@@ -105,6 +105,59 @@ test('anchored complete prefixes, strict IDs, structured method and route errors
   await errorCode(await f.handler(request('/api/v1/elevation/sample')), 405, 'method_not_allowed');
 });
 
+test('catalog search is authenticated, paged, no-store, and never invokes GolfAPI cache or provider', async () => {
+  const catalogPage = { datasetVersion: 'catalog-v1',
+    clubs: [{ clubID: 'club-1', clubName: 'Åre Golfklubb', country: 'Sweden', courses: [course] }],
+    numClubs: 1, numAllClubs: 27, page: 2, pageSize: 10, hasMore: true };
+  const f = fixture({ rpcImpl: async (name, args) => {
+    assert.equal(name, 'pintheory_catalog_search');
+    assert.deepEqual(args, { p_user_id: UID, p_query: 'Åre', p_country: 'Sweden',
+      p_state: 'Jämtland', p_page: 2, p_page_size: 10 });
+    return catalogPage;
+  } });
+  const res = await f.handler(request('/api/v1/catalog/clubs?q=%20A%CC%8Are%20&country=Sweden&state=J%C3%A4mtland&page=2&pageSize=10'));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  assert.equal(res.headers.get('x-dataset-version'), 'catalog-v1');
+  assert.equal(res.headers.get('x-cache'), null);
+  assert.deepEqual(await res.json(), catalogPage);
+  assert.deepEqual(f.calls.map(([name]) => name), ['pintheory_catalog_search']);
+  assert.equal(f.sends.length, 0);
+});
+
+test('catalog query accepts 200 characters and rejects longer input', async () => {
+  const query = 'x'.repeat(200);
+  const f = fixture({ rpcImpl: async (name, args) => {
+    assert.equal(name, 'pintheory_catalog_search');
+    assert.equal(args.p_query, query);
+    return { datasetVersion: 'catalog-v1', clubs: [], numClubs: 0,
+      numAllClubs: 0, page: 1, pageSize: 50, hasMore: false };
+  } });
+  assert.equal((await f.handler(request(`/api/v1/catalog/clubs?q=${query}`))).status, 200);
+  const tooLong = fixture();
+  await errorCode(await tooLong.handler(request(`/api/v1/catalog/clubs?q=${'x'.repeat(201)}`)), 400, 'invalid_request');
+  assert.equal(tooLong.calls.length, 0);
+});
+
+test('catalog search rejects malformed/oversized filters before RPC and gates invalid identity', async () => {
+  for (const [suffix, code] of [
+    ['/api/v1/catalog/clubs?page=0', 'invalid_request'],
+    ['/api/v1/catalog/clubs?pageSize=51', 'invalid_request'],
+    ['/api/v1/catalog/clubs?q=A&q=B', 'invalid_request'],
+    ['/api/v1/catalog/clubs?unknown=x', 'invalid_request'],
+    [`/api/v1/catalog/clubs?q=${encodeURIComponent('x'.repeat(201))}`, 'invalid_request'],
+    ['/api/v1/catalog/clubs?page=1&pageSize=50', 'search_required'],
+    ['/api/v1/catalog/clubs', 'search_required']
+  ]) {
+    const f = fixture();
+    await errorCode(await f.handler(request(suffix)), 400, code);
+    assert.equal(f.calls.length, 0);
+  }
+  const denied = fixture({ authenticate: async () => ({ id: 'not-uuid' }) });
+  await errorCode(await denied.handler(request('/api/v1/catalog/clubs?country=Sweden')), 401, 'unauthorized');
+  assert.equal(denied.calls.length, 0);
+});
+
 test('search NFC/trim, sorted canonical key, page default and update age match server', async () => {
   const f = fixture({ claim: { status: 'CLAIMED', token: TOKEN } });
   const res = await f.handler(request('/api/v1/golf/clubs?state=%20%20&name=%20A%CC%8A%20&country=SE&timestampUpdated=123'));
@@ -558,6 +611,23 @@ test('Supabase RPC fixed allowlist/service-only POST, 200 only, no identity/raw 
     });
     assert.equal(calls, 1);
   }
+});
+
+test('catalog search is the only added fixed Supabase RPC with service credentials', async () => {
+  let calls = 0;
+  const client = createSupabase({ url: URL_ROOT, anonKey: 'anon', serviceKey: SECRET }, {
+    fetchImpl: async (url, options) => {
+      calls++;
+      assert.equal(url, `${URL_ROOT}/rest/v1/rpc/pintheory_catalog_search`);
+      assert.equal(options.method, 'POST');
+      assert.equal(options.body, '{"p_user_id":"user","p_query":"A","p_country":"Sweden","p_state":"","p_page":1,"p_page_size":50}');
+      return json({ clubs: [], numClubs: 0, numAllClubs: 0, page: 1, pageSize: 50, hasMore: false, datasetVersion: 'v1' });
+    }
+  });
+  assert.equal((await client.rpc('pintheory_catalog_search', { p_user_id: 'user', p_query: 'A',
+    p_country: 'Sweden', p_state: '', p_page: 1, p_page_size: 50 })).numAllClubs, 0);
+  await assert.rejects(client.rpc('pintheory_catalog_import_chunk', {}), { statusCode: 503 });
+  assert.equal(calls, 1);
 });
 
 test('Supabase auth failure, bad JSON/UTF8/oversize/redirect/stream/timeout/config fail closed', async () => {

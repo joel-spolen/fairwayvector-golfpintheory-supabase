@@ -38,7 +38,9 @@ tables or commit setup fixtures. Never disable history triggers to force a pass.
    [metrics](../tests/sql/admin_account_metrics_regression.sql), and
    [shared cache](../tests/shared_data_cache.sql),
    [club profile](../tests/sql/club_profile_sync_regression.sql), and
-   [club profile timestamp](../tests/sql/club_profile_lww_regression.sql).
+   [club profile timestamp](../tests/sql/club_profile_lww_regression.sql),
+   [private catalog import](../tests/sql/catalog_import_regression.sql), and
+   [catalog search](../tests/sql/catalog_search_regression.sql).
    Do not loop over every SQL file:
    the concurrency script is explicitly **not** a single-session executable.
 3. Execute [concurrency sections](../tests/sql/concurrency_regression.sql) in

@@ -7,9 +7,9 @@ operational records separate.
 
 ## 1. Reconcile existing migration history first
 
-The migration sequence currently ends with `202610250001_sync_club_profile.sql`
-and `202610250002_club_profile_lww.sql`, following the original account/cache
-migrations. Keep filenames/order. Earlier migrations contain non-idempotent
+The migration sequence currently includes `202610300001_private_club_catalog_import.sql`,
+`202610300002_catalog_search.sql`, and `202610300003_catalog_search_query_limit.sql`
+after the sync/account/cache migrations. Keep filenames/order. Earlier migrations contain non-idempotent
 CREATE statements and must not be blindly replayed on a populated project.
 
 Before **any** linked push, an operator must compare the target's migration ledger

@@ -24,7 +24,7 @@ configuration and deployment.
 - Every valid data request invokes `pintheory_data_claim` with the verified UUID,
   including cache hits. SQL is responsible for the current Auth banned/deleted
   and sync blocked/deleting account gates and all global/per-user limits.
-- Service REST calls use a fixed four-RPC allowlist. Legacy service JWT keys use
+- Service REST calls use a fixed RPC allowlist. Legacy service JWT keys use
   apikey + bearer; `sb_secret_` keys use apikey only. Exactly HTTP 200 is accepted.
   Auth and RPC each have a 10-second entire-operation abort/deadline, including
   bounded streamed JSON reads. No transport retries or raw error bodies/logs.
@@ -41,6 +41,8 @@ syntax are enforced before trimming/NFC normalization. Empty normalized fields
 are dropped, page defaults to `1`, sorted pairs produce the same SHA-256 key.
 timestampUpdated probes use `p_max_age_seconds: 86400`; other requests use null.
 Detail and coordinates accept only the existing strict ID syntax, no query.
+
+See [catalog-search integration and license/deployment gate](README.catalog-search.md).
 
 POST elevation/sample accepts JSON or GPXZ-style URL-encoded form bodies, at
 most 300000 streamed bytes. Top-level and point unknown fields, duplicate form

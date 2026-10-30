@@ -6,6 +6,6 @@
         "node": ">=22"
     },
     "scripts": {
-        "test": "node --test tests/edge.test.js tests/provenance.test.js"
+        "test": "node --test tests/edge.test.js tests/provenance.test.js tests/cache-sweden-clubs.test.js tests/download-clubs.test.js tests/validate-clubs.test.js tests/import-clubs.test.js"
     }
 }
