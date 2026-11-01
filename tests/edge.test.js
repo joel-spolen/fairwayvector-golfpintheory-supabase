@@ -2,8 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createHandler } from '../supabase/functions/golf-data/handler.js';
-import { Providers, validateGolf, validateElevation } from '../supabase/functions/_shared/providers.js';
-import { profileRequest, pointAt, distance } from '../supabase/functions/_shared/geometry.js';
+import { Providers, validateGolf } from '../supabase/functions/_shared/providers.js';
 import { APIError } from '../supabase/functions/_shared/errors.js';
 import { createSupabase } from '../supabase/functions/_shared/supabase.js';
 
@@ -21,13 +20,8 @@ const json = (body, options) => new Response(JSON.stringify(body), options);
 const sha = value => createHash('sha256').update(value).digest('hex');
 const course = { courseID: 'A', courseName: 'Å Links' };
 const hit = body => ({ status: 'HIT', body, fetchedAt: FETCHED, datasetVersion: 'fixture-v1' });
-const path = [{ lat: 57.12345678901234, lon: 12 }, { lat: 57.12355678901234, lon: 12.0001 }];
-const sample = { path, samples: 3 };
 const request = (suffix = '/api/v1/golf/courses/A', options = {}) => new Request(`${ROOT}${suffix}`, {
   ...options, headers: { Authorization: 'Bearer offline-user', ...options.headers }
-});
-const post = (body = sample, headers = {}) => request('/api/v1/elevation/sample', {
-  method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body)
 });
 function fixture({ claim = hit(course), rpcImpl, authenticate, providers: overrides = {} } = {}) {
   const calls = [];
@@ -35,7 +29,6 @@ function fixture({ claim = hit(course), rpcImpl, authenticate, providers: overri
   const authentications = [];
   const providers = { configured: { golf: true, gpxz: true },
     async golf(...args) { sends.push(['golf', ...args]); return { body: course, datasetVersion: 'v1' }; },
-    async elevation(...args) { sends.push(['gpxz', ...args]); return { body: elevation(args[0]), datasetVersion: 'gpxz-v1' }; },
     ...overrides };
   const handler = createHandler({ providers,
     authenticate: async token => { authentications.push(token); return authenticate ? authenticate(token) : { id: UID }; },
@@ -44,12 +37,6 @@ function fixture({ claim = hit(course), rpcImpl, authenticate, providers: overri
       return rpcImpl ? rpcImpl(name, args) : name === 'pintheory_data_claim' ? claim : true;
     } });
   return { handler, calls, sends, authentications };
-}
-function elevation(profile) {
-  return { status: 'OK', results: Array.from({ length: profile.samples }, (_, i) => ({
-    ...pointAt(profile, profile.length * i / (profile.samples - 1)), elevation: 123.456,
-    resolution: 2, data_source: 'fixture'
-  })) };
 }
 async function errorCode(response, expectedStatus, code) {
   assert.equal(response.status, expectedStatus);
@@ -102,7 +89,8 @@ test('anchored complete prefixes, strict IDs, structured method and route errors
   for (const method of ['HEAD', 'PUT', 'DELETE', 'POST']) {
     await errorCode(await f.handler(request(undefined, { method })), 405, 'method_not_allowed');
   }
-  await errorCode(await f.handler(request('/api/v1/elevation/sample')), 405, 'method_not_allowed');
+  await errorCode(await f.handler(request('/api/v1/elevation/sample')), 404, 'not_found');
+  await errorCode(await f.handler(request('/api/v1/elevation/sample', { method: 'POST' })), 404, 'not_found');
 });
 
 test('catalog search is authenticated, paged, no-store, and never invokes GolfAPI cache or provider', async () => {
@@ -204,7 +192,7 @@ test('search schema rejects duplicate/unknown params, oversized text, invalid pa
   }
   const f = fixture();
   await errorCode(await f.handler(request('/api/v1/golf/courses/A?name=A')), 400, 'invalid_request');
-  await errorCode(await f.handler(request('/api/v1/elevation/sample?name=A', { method: 'POST' })), 400, 'invalid_request');
+  await errorCode(await f.handler(request('/api/v1/golf/courses/A/bundle?name=A')), 400, 'invalid_request');
 });
 
 test('detail and coordinates use exact versioned key and provider path', async () => {
@@ -286,15 +274,13 @@ test('claim outcomes never dispatch; PENDING fixed retry=2; UNKNOWN requires ope
 });
 
 test('missing provider keys force cache-only BEFORE claim: hit works, miss is 503', async () => {
-  for (const provider of ['golf', 'gpxz']) {
-    for (const status of ['HIT', 'CACHE_MISS']) {
-      const f = fixture({ providers: { configured: { golf: false, gpxz: false } },
-        claim: status === 'HIT' ? hit(course) : { status } });
-      const res = await f.handler(provider === 'golf' ? request() : post());
-      assert.equal(f.calls[0][1].p_cache_only, true); assert.equal(f.sends.length, 0);
-      if (status === 'HIT') assert.equal(res.status, 200);
-      else await errorCode(res, 503, 'provider_not_configured');
-    }
+  for (const status of ['HIT', 'CACHE_MISS']) {
+    const f = fixture({ providers: { configured: { golf: false, gpxz: false } },
+      claim: status === 'HIT' ? hit(course) : { status } });
+    const res = await f.handler(request());
+    assert.equal(f.calls[0][1].p_cache_only, true); assert.equal(f.sends.length, 0);
+    if (status === 'HIT') assert.equal(res.status, 200);
+    else await errorCode(res, 503, 'provider_not_configured');
   }
   const f = fixture({ claim: { status: 'CACHE_MISS' } });
   await errorCode(await f.handler(request(undefined, { headers: { 'X-Cache-Only': 'true' } })), 404, 'cache_miss');
@@ -363,55 +349,6 @@ test('provider exception persisted once with bounded cooldown; fail persistence 
   }
 });
 
-test('elevation JSON/form normalize to identical source key; course association excluded from key/provider', async () => {
-  const a = fixture({ claim: { status: 'CLAIMED', token: TOKEN } });
-  const b = fixture({ claim: { status: 'CLAIMED', token: TOKEN } });
-  assert.equal((await a.handler(post({ path: [path[0], path[0], path[1]], samples: 3, courseID: 'A' }))).status, 200);
-  const form = new URLSearchParams({ latlons: path.map(p => `${p.lat},${p.lon}`).join('|'), samples: '3', courseID: 'B',
-    interpolation: 'bilinear', bathymetry: 'false' });
-  assert.equal((await b.handler(request('/api/v1/elevation/sample', { method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }, body: form }))).status, 200);
-  const key = `gpxz:sample:v1:${sha(JSON.stringify({ path, samples: 3, interpolation: 'bilinear', bathymetry: false }))}`;
-  assert.equal(a.calls[0][1].p_key, key); assert.equal(b.calls[0][1].p_key, key);
-  assert.equal(a.calls[1][1].p_metadata.courseID, 'A'); assert.equal(b.calls[1][1].p_metadata.courseID, 'B');
-  assert.equal(a.calls[1][1].p_metadata.profileLengthMeters, profileRequest(sample).length);
-  assert.ok(!own(a.sends[0][1], 'courseID')); assert.deepEqual(a.sends, b.sends);
-  const c = fixture({ claim: hit(elevation(profileRequest(sample))) });
-  assert.equal((await c.handler(post({ ...sample, courseID: 'C' }))).status, 200);
-  assert.deepEqual(c.calls[1], ['pintheory_data_tag', { p_key: key, p_course_id: 'C' }]);
-  const d = fixture({ claim: { status: 'CLAIMED', token: TOKEN } });
-  await d.handler(post()); assert.ok(!own(d.calls[1][1].p_metadata, 'courseID'));
-});
-const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
-
-test('elevation strict schema/geometry/body limits reject before claim', async () => {
-  for (const body of [null, [], {}, { ...sample, extra: true }, { ...sample, path: [{ ...path[0], extra: true }, path[1]] },
-    { ...sample, path: [{ lat: '57', lon: 12 }, path[1]] }, { ...sample, latlons: '57,12|57.01,12' },
-    { ...sample, samples: '1e2' }, { ...sample, samples: null }, { ...sample, samples: true }, { ...sample, samples: 513 },
-    { ...sample, samples: 1 }, { ...sample, courseID: 'bad:id' }, { ...sample, courseID: null },
-    { ...sample, path: [path[0], path[0]] }, { ...sample, path: [{ lat: 91, lon: 0 }, path[1]] },
-    { ...sample, path: [{ lat: 0, lon: 0 }, { lat: 1, lon: 1 }] },
-    { ...sample, interpolation: 'nearest' }, { ...sample, bathymetry: true },
-    { ...sample, latlons: 'x'.repeat(250001), path: undefined }]) {
-    const f = fixture(); assert.equal((await f.handler(post(body))).status, 400, JSON.stringify(body).slice(0, 100));
-    assert.equal(f.calls.length, 0);
-  }
-  for (const text of ['latlons=57,12|57.0001,12&samples=2&samples=2', 'url=evil', 'path=%5B%5D']) {
-    const f = fixture();
-    assert.equal((await f.handler(request('/api/v1/elevation/sample', { method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: text }))).status, 400);
-    assert.equal(f.calls.length, 0);
-  }
-  for (const [body, headers, status] of [['{broken', { 'Content-Type': 'application/json' }, 400],
-    ['x'.repeat(300001), { 'Content-Type': 'application/json' }, 413],
-    ['{}', { 'Content-Type': 'application/json', 'Content-Length': '300001' }, 413],
-    ['{}', { 'Content-Type': 'text/plain' }, 415]]) {
-    const f = fixture();
-    assert.equal((await f.handler(request('/api/v1/elevation/sample', { method: 'POST', body, headers }))).status, status);
-    assert.equal(f.calls.length, 0);
-  }
-});
-
 function realProviders(fetchImpl, overrides = {}) {
   return new Providers({ providers: { golf: { key: 'golf-fixture-key' }, gpxz: { key: 'gpxz-fixture-key' } } },
     { fetchImpl, ...overrides });
@@ -429,7 +366,7 @@ test('real provider transport uncertainty leaves dispatched job/reservation; lat
     async () => new Response('{malformed'),
     async () => new Response('x', { headers: { 'Content-Length': '4000001' } })
   ];
-  for (const makeRequest of [request, post]) {
+  for (const makeRequest of [request]) {
     for (const fetchImpl of failures) {
       let sends = 0; let reservations = 0; let state; let expired = false;
       const calls = [];
@@ -538,23 +475,7 @@ test('unnamed course details are committed unchanged and reused without another 
   assert.throws(() => validateGolf(body, 'detail', id.slice(1)), { code: 'invalid_provider_response' });
 });
 
-test('real Providers GPXZ fixed form uses original vertices (not resampled), validates exact output', async () => {
-  const profile = profileRequest(sample);
-  const expected = elevation(profile);
-  let calls = 0;
-  const providers = realProviders(async (url, options) => {
-    calls++; assert.equal(url, 'https://api.gpxz.io/v1/elevation/sample');
-    assert.equal(options.method, 'POST'); assert.equal(options.redirect, 'error');
-    assert.deepEqual(options.headers, { 'x-api-key': 'gpxz-fixture-key', 'Content-Type': 'application/x-www-form-urlencoded' });
-    assert.equal(options.body, new URLSearchParams({ latlons: path.map(p => `${p.lat},${p.lon}`).join('|'),
-      samples: '3', interpolation: 'bilinear', bathymetry: 'false' }).toString());
-    return json(expected);
-  });
-  assert.deepEqual((await providers.elevation(profile)).body, expected); assert.equal(calls, 1);
-  assert.deepEqual(profile.path, path);
-});
-
-test('real provider validation rejects wrong IDs, coordinate shape, nonfinite/offset samples and missing metadata', () => {
+test('real provider validation rejects wrong IDs', () => {
   for (const [body, kind, id] of [[[], 'clubs'], [{ clubs: [{}] }, 'clubs'],
     [{ courses: [{ courseID: 'A' }] }, 'courses'], [{ ...course, courseID: 'B' }, 'detail', 'A'],
     [{ courseID: 'A', coordinates: [] }, 'coordinates', 'A'],
@@ -563,24 +484,12 @@ test('real provider validation rejects wrong IDs, coordinate shape, nonfinite/of
   }
   assert.deepEqual(validateGolf({ courseID: 'A', coordinates: [{ poi: '1', hole: '2', latitude: '57', longitude: '12' }] },
     'coordinates', 'A').courseID, 'A');
-  const profile = profileRequest(sample);
-  for (const mutate of [b => { b.status = 'ERROR'; }, b => { b.results.pop(); },
-    b => { b.results[0].lat += 0.0001; }, b => { b.results[1].lon += 0.0001; },
-    b => { b.results[1].elevation = Infinity; }, b => { b.results[1].resolution = 0; },
-    b => { delete b.results[1].data_source; }, b => { b.results.reverse(); }]) {
-    const body = elevation(profile); mutate(body);
-    assert.throws(() => validateElevation(body, profile), { code: 'invalid_provider_response', providerWide: false });
-  }
-  const dateline = profileRequest({ path: [{ lat: 0, lon: 179.999 }, { lat: 0, lon: -179.999 }], samples: 3 });
-  assert.ok(Math.abs(pointAt(dateline, dateline.length / 2).lon) > 179.99);
-  assert.equal(distance(dateline.path[0], pointAt(dateline, 0)), 0);
-  assert.deepEqual(validateElevation(elevation(dateline), dateline), elevation(dateline));
 });
 
 test('provider missing keys never sends; HTTP/error/redirect/JSON/UTF8/size/timeout sanitized without retries', async () => {
   const disabled = new Providers({ providers: {} }, { fetchImpl: () => assert.fail('missing key dispatched') });
   await assert.rejects(disabled.golf('/clubs', {}, 'clubs'), { code: 'provider_not_configured' });
-  await assert.rejects(disabled.elevation(profileRequest(sample)), { code: 'provider_not_configured' });
+  await assert.rejects(disabled.elevationRaster({}), { code: 'provider_not_configured' });
   for (const status of [301, 401, 403, 404, 429, 500]) {
     let calls = 0; let cancelled = false;
     const providers = realProviders(async () => {

@@ -1,9 +1,11 @@
 import { APIError } from './errors.js';
-import { readText, cancelBody, withDeadline } from './web.js';
+import { readBytes, readText, cancelBody, withDeadline } from './web.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RPCS = new Set(['pintheory_data_claim', 'pintheory_data_finish', 'pintheory_data_fail', 'pintheory_data_tag',
   'pintheory_catalog_search']);
+const TERRAIN_BUCKET = 'course-terrain';
+const TERRAIN_OBJECT = /^[a-f0-9]{64}\.pttr$/;
 const unavailable = () => new APIError(503, 'service_unavailable', 'Data service is temporarily unavailable.');
 const unauthorized = () => new APIError(401, 'unauthorized', 'Valid user bearer token required.');
 
@@ -17,7 +19,7 @@ export function createSupabase({ url, anonKey, serviceKey }, { fetchImpl = globa
     root = parsed.origin;
   } catch { /* Missing/malformed deployment config fails closed at request time. */ }
 
-  async function json(endpoint, options, limit, auth = false) {
+  async function call(endpoint, options, limit, { auth = false, binary = false } = {}) {
     try {
       return await withDeadline(timeoutMs, async signal => {
         const res = await fetchImpl(`${root}${endpoint}`, { ...options, redirect: 'error', signal });
@@ -26,13 +28,21 @@ export function createSupabase({ url, anonKey, serviceKey }, { fetchImpl = globa
           if (auth && [401, 403].includes(res.status)) throw unauthorized();
           throw unavailable();
         }
-        return JSON.parse(await readText(res.body, limit, signal));
+        return binary ? await readBytes(res.body, limit, signal) : JSON.parse(await readText(res.body, limit, signal));
       });
     } catch (error) {
       if (error instanceof APIError) throw error;
       throw unavailable();
     }
   }
+  const json = (endpoint, options, limit, auth = false) => call(endpoint, options, limit, { auth });
+  const serviceHeaders = () => ({
+    apikey: serviceKey, ...(serviceKey.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${serviceKey}` })
+  });
+  const objectPath = path => {
+    if (!root || !serviceKey || !TERRAIN_OBJECT.test(path)) throw unavailable();
+    return `/storage/v1/object/${TERRAIN_BUCKET}/${path}`;
+  };
 
   return {
     async authenticate(token) {
@@ -47,9 +57,19 @@ export function createSupabase({ url, anonKey, serviceKey }, { fetchImpl = globa
     async rpc(name, args) {
       if (!root || !serviceKey || !RPCS.has(name)) throw unavailable();
       return await json(`/rest/v1/rpc/${name}`, { method: 'POST', headers: {
-        apikey: serviceKey, ...(serviceKey.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${serviceKey}` }),
-        'Content-Type': 'application/json', Accept: 'application/json'
+        ...serviceHeaders(), 'Content-Type': 'application/json', Accept: 'application/json'
       }, body: JSON.stringify(args) }, 5000000);
+    },
+    // Private bucket, service credentials only; objects are content-addressed packed grids.
+    storage: {
+      async upload(path, bytes) {
+        await json(objectPath(path), { method: 'POST', headers: {
+          ...serviceHeaders(), 'Content-Type': 'application/octet-stream', 'x-upsert': 'true'
+        }, body: bytes }, 64000);
+      },
+      async download(path, limit) {
+        return await call(objectPath(path), { method: 'GET', headers: serviceHeaders() }, limit, { binary: true });
+      }
     }
   };
 }

@@ -300,6 +300,35 @@ begin
     assert (m#>>'{traffic,coalesced}')::bigint=(select sum(coalesced) from pintheory_data.traffic);
 end $$;
 
+-- After 202611010001: course raster manifests (packed grid lives in Storage).
+do $$ declare uid uuid := '24000002-0000-4000-8000-000000000001'; c jsonb; a uuid;
+    k text := 'gpxz:raster:v1:' || repeat('e',64);
+    h text := repeat('f',64);
+    body jsonb := jsonb_build_object('format','pttr-v1','sha256',repeat('f',64),'storagePath',repeat('f',64) || '.pttr',
+        'width',1300,'height',1200);
+begin
+    assert pintheory_data.key_valid(k,'gpxz') and not pintheory_data.key_valid(k,'golf');
+    assert not pintheory_data.key_valid('gpxz:raster:v1:' || repeat('E',64),'gpxz');
+    assert not pintheory_data.key_valid('gpxz:raster:v2:' || repeat('e',64),'gpxz');
+    c:=public.pintheory_data_claim(uid,k,'gpxz',false); a:=(c->>'token')::uuid;
+    assert c->>'status'='CLAIMED';
+    assert not public.pintheory_data_finish(k,a,body - 'format');
+    assert not public.pintheory_data_finish(k,a,body || '{"sha256":"short"}');
+    assert not public.pintheory_data_finish(k,a,body || jsonb_build_object('storagePath','../' || h || '.pttr'));
+    assert not public.pintheory_data_finish(k,a,body,null,'{"profileLengthMeters":1}');
+    assert public.pintheory_data_finish(k,a,body,'2025.1','{"courseID":"raster-course"}');
+    assert exists (select 1 from pintheory_data.elevation_courses where key=k and course_id='raster-course');
+    c:=public.pintheory_data_claim(uid,k,'gpxz',true);
+    assert c->>'status'='HIT' and c#>>'{body,storagePath}'=h || '.pttr';
+    assert public.pintheory_data_tag(k,'second-course');
+    delete from pintheory_data.elevation_courses where key=k;
+    delete from pintheory_data.responses where key=k;
+    delete from pintheory_data.jobs where key=k;
+    if pg_catalog.to_regclass('storage.buckets') is not null then
+        assert (select not public from storage.buckets where id='course-terrain');
+    end if;
+end $$;
+
 -- Bounded pages/options/unassigned; inventory stays global under search.
 insert into pintheory_data.responses(key,provider,body,fetched_at)
 select 'golf:v1:detail:page' || lpad(n::text,4,'0'),'golf',

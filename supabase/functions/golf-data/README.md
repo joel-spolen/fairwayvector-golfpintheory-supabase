@@ -44,16 +44,22 @@ Detail and coordinates accept only the existing strict ID syntax, no query.
 
 See [catalog-search integration and license/deployment gate](README.catalog-search.md).
 
-POST elevation/sample accepts JSON or GPXZ-style URL-encoded form bodies, at
-most 300000 streamed bytes. Top-level and point unknown fields, duplicate form
-parameters, query parameters, and invalid schema/geometry/options are rejected.
-The copied geometry preserves vertices, repeated-point normalization, sample
-count, precision, longitude interpolation, and the exact normalized key format.
-Optional courseID is metadata only, never part of the key or paid provider form.
-Shared validators and provider formats are copied from the current server;
-provider transport uses bounded Uint8Array + fatal TextDecoder instead of Buffer,
-rejects redirects and bounds the entire request/stream to 30 seconds/4000000 bytes.
-An injectable provider timeout is available only for offline tests.
+GET `golf/courses/:id/bundle` returns `{ detail, coordinates, terrain }`. Detail
+and coordinates use the normal golf cache. Terrain covers the rectangle around
+every course coordinate plus 75 m, split into tiles of at most 2500 × 2500 px at
+1 m (8 million px total, otherwise `course_too_large`). Each tile is one GPXZ
+`/v1/elevation/raster` request keyed `gpxz:raster:v1:<sha256 of bounds/size>`:
+the GeoTIFF is decoded (`_shared/tiff.js`), validated against the requested
+bounds, packed into PTTR v1 (`_shared/terrain.js`, UInt16 centimetres, raw
+deflate) and uploaded to the private `course-terrain` bucket before `finish`
+stores the manifest. Tiles report `ready`, `pending` or `unavailable` with the
+claim code; terrain problems never fail the course. GET `golf/terrain/:id`
+streams a stored tile after a cache-only claim and SHA-256 check. The former
+per-path `POST elevation/sample` route is removed (old `gpxz:sample` rows remain).
+Provider transport rejects redirects and bounds the entire request/stream to 30
+seconds and 4000000 bytes (60000000 for rasters). An injectable provider timeout
+is available only for offline tests. Staging enablement is the manual
+[`scripts/enable-gpxz-staging.sql`](../../../scripts/enable-gpxz-staging.sql).
 
 ## RPC handoff (parent integration)
 
@@ -62,8 +68,8 @@ All names/parameters match the current shared-data-cache migration:
 - claim: `p_user_id`, `p_key`, `p_provider`, `p_cache_only`,
   `p_max_age_seconds` -> status/body/fetchedAt/datasetVersion or token/retryAfter.
 - finish: `p_key`, `p_token`, `p_body`, `p_dataset_version`, `p_metadata`
-  -> boolean. Golf metadata is `{}`; elevation contains profileLengthMeters and
-  only an actually supplied courseID.
+  -> boolean. Golf metadata is `{}`; raster tiles contain the course ID and a
+  `pttr-v1` manifest whose `storagePath` is `<sha256>.pttr`.
 - fail: `p_key`, `p_token`, `p_provider_wide`, `p_retry_after` -> boolean.
   Only definitive provider APIErrors (`ambiguous !== true`) persist a cooldown
   of at least 300 seconds, capped at 86400. Known non-OK HTTP responses and

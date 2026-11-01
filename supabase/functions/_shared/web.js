@@ -1,5 +1,9 @@
 // Bounded Web streams only: no Node Buffer and no unbounded response.json().
 export async function readText(body, limit, signal) {
+  return new TextDecoder('utf-8', { fatal: true }).decode(await readBytes(body, limit, signal));
+}
+
+export async function readBytes(body, limit, signal) {
   if (!body) throw new Error('Missing body');
   const reader = body.getReader();
   const cancel = () => { void reader.cancel().catch(() => {}); };
@@ -19,7 +23,7 @@ export async function readText(body, limit, signal) {
     const bytes = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return bytes;
   } finally {
     signal?.removeEventListener('abort', cancel);
     cancel();

@@ -1,17 +1,15 @@
 import { APIError } from '../_shared/errors.js';
-import { profileRequest } from '../_shared/geometry.js';
-import { readText, withDeadline } from '../_shared/web.js';
+import { courseBounds, packGrid, sha256Hex, terrainTiles, RESOLUTION_METERS } from '../_shared/terrain.js';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const identifier = /^[A-Za-z0-9_-]{1,100}$/;
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const invalid = () => { throw new APIError(400, 'invalid_request', 'Request rejected.'); };
 const unavailable = () => new APIError(503, 'service_unavailable', 'Data service is temporarily unavailable.');
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+const TERRAIN_DOWNLOAD_LIMIT = 64_000_000;
 
 async function hash(value) {
-  const bytes = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+  return sha256Hex(new TextEncoder().encode(value));
 }
 
 function parameters(search, allowed) {
@@ -23,36 +21,31 @@ function parameters(search, allowed) {
   return values;
 }
 
-async function elevationBody(request) {
-  if (Number(request.headers.get('content-length')) > 300000) {
-    throw new APIError(413, 'body_too_large', 'Request body is too large.');
-  }
-  const type = request.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
-  if (!['application/json', 'application/x-www-form-urlencoded'].includes(type)) {
-    throw new APIError(415, 'unsupported_media_type', 'Use JSON or form encoding.');
-  }
-  let body;
-  try {
-    const text = await withDeadline(10000, signal => readText(request.body, 300000, signal));
-    body = type === 'application/json' ? JSON.parse(text) : parameters(new URLSearchParams(text),
-      ['path', 'latlons', 'samples', 'courseID', 'interpolation', 'bathymetry']);
-  } catch (error) {
-    if (error instanceof APIError) throw error;
-    if (error instanceof RangeError) throw new APIError(413, 'body_too_large', 'Request body is too large.');
-    invalid();
-  }
-  const fields = ['path', 'latlons', 'samples', 'courseID', 'interpolation', 'bathymetry'];
-  if (!object(body) || Object.keys(body).some(key => !fields.includes(key))) invalid();
-  if (own(body, 'path') && (!Array.isArray(body.path) || body.path.length < 2 || body.path.length > 5000
-      || body.path.some(p => !object(p) || Object.keys(p).length !== 2
-        || !own(p, 'lat') || !own(p, 'lon') || typeof p.lat !== 'number' || typeof p.lon !== 'number'))) invalid();
-  if (own(body, 'latlons') && (typeof body.latlons !== 'string' || body.latlons.length > 250000)) invalid();
-  if (own(body, 'samples') && !(Number.isInteger(body.samples)
-      || typeof body.samples === 'string' && /^[0-9]{1,3}$/.test(body.samples))) invalid();
-  if (own(body, 'courseID') && (typeof body.courseID !== 'string' || !identifier.test(body.courseID))) invalid();
-  if (own(body, 'interpolation') && typeof body.interpolation !== 'string') invalid();
-  if (own(body, 'bathymetry') && !['boolean', 'string'].includes(typeof body.bathymetry)) invalid();
-  return body;
+function golfDetail(collection, id) {
+  const kind = collection === 'courses' ? 'detail' : 'coordinates';
+  return { provider: 'golf', key: `golf:v1:${kind}:${id}`, maxAge: null, metadata: {},
+    acquire: providers => providers.golf(`/${collection}/${id}`, {}, kind, id) };
+}
+
+function rasterTile(tile, courseID, storage) {
+  return { provider: 'gpxz', key: `gpxz:raster:v1:${tile.id}`, maxAge: null, metadata: { courseID },
+    acquire: async providers => {
+      const raster = await providers.elevationRaster(tile);
+      const bounds = { left: tile.left, right: tile.right, bottom: tile.bottom, top: tile.top };
+      const packed = await packGrid({ width: tile.width, height: tile.height, data: raster.grid, bounds });
+      const storagePath = `${packed.sha256}.pttr`;
+      try { await storage.upload(storagePath, packed.bytes); }
+      catch {
+        // The paid response was received intact; record a definitive, retryable failure.
+        const error = new APIError(503, 'storage_unavailable', 'Terrain storage is temporarily unavailable.');
+        error.ambiguous = false; error.providerWide = false;
+        throw error;
+      }
+      return { datasetVersion: raster.datasetVersion, body: { format: 'pttr-v1', sha256: packed.sha256,
+        storagePath, bytes: packed.bytes.length, width: tile.width, height: tile.height, bounds,
+        resolutionMeters: RESOLUTION_METERS, sources: raster.sources,
+        captureDateMin: raster.captureDateMin, captureDateMax: raster.captureDateMax } };
+    } };
 }
 
 async function route(request) {
@@ -64,11 +57,10 @@ async function route(request) {
   const search = /^\/api\/v1\/golf\/(clubs|courses)$/.exec(path);
   const catalogSearch = path === '/api/v1/catalog/clubs';
   const detail = /^\/api\/v1\/golf\/(courses|coordinates)\/([A-Za-z0-9_-]{1,100})$/.exec(path);
-  const elevation = path === '/api/v1/elevation/sample';
-  if (!search && !catalogSearch && !detail && !elevation) throw new APIError(404, 'not_found', 'Route not found.');
-  if (request.method !== (elevation ? 'POST' : 'GET')) {
-    throw new APIError(405, 'method_not_allowed', 'Method not allowed.');
-  }
+  const bundle = /^\/api\/v1\/golf\/courses\/([A-Za-z0-9_-]{1,100})\/bundle$/.exec(path);
+  const terrain = /^\/api\/v1\/golf\/terrain\/([a-f0-9]{64})$/.exec(path);
+  if (!search && !catalogSearch && !detail && !bundle && !terrain) throw new APIError(404, 'not_found', 'Route not found.');
+  if (request.method !== 'GET') throw new APIError(405, 'method_not_allowed', 'Method not allowed.');
   if (catalogSearch) {
     const raw = parameters(url.searchParams, ['q', 'country', 'state', 'countries', 'page', 'pageSize']);
     const query = {};
@@ -118,19 +110,9 @@ async function route(request) {
       acquire: providers => providers.golf(`/${kind}`, query, kind) };
   }
   parameters(url.searchParams, []);
-  if (detail) {
-    const [, collection, id] = detail;
-    const kind = collection === 'courses' ? 'detail' : 'coordinates';
-    return { provider: 'golf', key: `golf:v1:${kind}:${id}`, maxAge: null, metadata: {},
-      acquire: providers => providers.golf(`/${collection}/${id}`, {}, kind, id) };
-  }
-  const body = await elevationBody(request);
-  const profile = profileRequest(body);
-  const key = `gpxz:sample:v1:${await hash(JSON.stringify({ path: profile.path, samples: profile.samples,
-    interpolation: 'bilinear', bathymetry: false }))}`;
-  return { provider: 'gpxz', key, maxAge: null,
-    metadata: { profileLengthMeters: profile.length, ...(body.courseID ? { courseID: body.courseID } : {}) },
-    acquire: providers => providers.elevation(profile) };
+  if (bundle) return { kind: 'bundle', id: bundle[1] };
+  if (terrain) return { kind: 'terrain', id: terrain[1] };
+  return golfDetail(detail[1], detail[2]);
 }
 
 function response(body, status = 200, headers = {}) {
@@ -140,7 +122,7 @@ function response(body, status = 200, headers = {}) {
   } });
 }
 
-function send(body, cache, fetchedAt, version) {
+function send({ body, cache, fetchedAt, datasetVersion: version }) {
   const headers = { 'X-Cache': cache };
   if (typeof fetchedAt === 'string' && /^\d{4}-\d\d-\d\dT[0-9:.]+Z$/.test(fetchedAt)
       && Number.isFinite(Date.parse(fetchedAt))) headers['X-Fetched-At'] = fetchedAt;
@@ -165,7 +147,76 @@ function claimError(claim, missingConfig) {
   return own(statuses, claim.status) ? new APIError(...statuses[claim.status]) : unavailable();
 }
 
-export function createHandler({ authenticate, rpc, providers }) {
+export function createHandler({ authenticate, rpc, providers, storage }) {
+  // Every request, including hits, goes through the SQL account/banned gate.
+  async function load(userID, operation, cacheOnlyRequested) {
+    const { key, provider, metadata } = operation;
+    const configured = providers.configured?.[provider] === true;
+    const cacheOnly = cacheOnlyRequested || !configured;
+    const claim = await rpc('pintheory_data_claim', { p_user_id: userID, p_key: key,
+      p_provider: provider, p_cache_only: cacheOnly, p_max_age_seconds: operation.maxAge });
+    if (!object(claim)) throw unavailable();
+    if (claim.status === 'HIT') {
+      if (!object(claim.body)) throw unavailable();
+      if (metadata.courseID && await rpc('pintheory_data_tag', { p_key: key, p_course_id: metadata.courseID }) !== true) {
+        throw unavailable();
+      }
+      return { body: claim.body, cache: 'HIT', fetchedAt: claim.fetchedAt, datasetVersion: claim.datasetVersion };
+    }
+    if (claim.status !== 'CLAIMED') throw claimError(claim, !configured);
+    if (typeof claim.token !== 'string' || !UUID.test(claim.token)) throw unavailable();
+    // Defense in depth if the DB unexpectedly returns CLAIMED for cache-only.
+    if (cacheOnly) {
+      try { await rpc('pintheory_data_fail', { p_key: key, p_token: claim.token,
+        p_provider_wide: false, p_retry_after: 300 }); } catch { /* No dispatch or retry. */ }
+      throw unavailable();
+    }
+    let result;
+    try { result = await operation.acquire(providers); }
+    catch (error) {
+      if (!(error instanceof APIError) || error.ambiguous === true) {
+        // Keep dispatched and all reservations: only an operator may allow another paid send.
+        throw new APIError(503, 'ambiguous_attempt', 'Provider attempt is ambiguous; operator resolution is required.');
+      }
+      try {
+        await rpc('pintheory_data_fail', { p_key: key, p_token: claim.token,
+          p_provider_wide: error.providerWide !== false,
+          p_retry_after: Math.max(300, Math.min(86400, Number.isInteger(error.retryAfter) ? error.retryAfter : 300)) });
+      } catch { throw unavailable(); }
+      throw error;
+    }
+    // Never fail/reclaim/replay after a finish failure: commit outcome may be unknown.
+    const finished = await rpc('pintheory_data_finish', { p_key: key, p_token: claim.token,
+      p_body: result.body, p_dataset_version: result.datasetVersion ?? null, p_metadata: metadata });
+    if (finished !== true) throw new APIError(503, 'cache_write_rejected', 'Provider result could not be committed.');
+    return { body: result.body, cache: 'MISS', fetchedAt: new Date().toISOString(), datasetVersion: result.datasetVersion };
+  }
+
+  // Terrain never blocks the course: each tile reports ready, pending or unavailable.
+  async function courseTerrain(userID, courseID, coordinates) {
+    const bounds = courseBounds(coordinates?.coordinates);
+    const tiles = bounds && await terrainTiles(bounds);
+    if (!tiles) return { status: 'unavailable', code: bounds ? 'course_too_large' : 'invalid_geometry', tiles: [] };
+    const results = [];
+    for (const tile of tiles) {
+      try {
+        const loaded = await load(userID, rasterTile(tile, courseID, storage), false);
+        const b = loaded.body;
+        if (b.format !== 'pttr-v1' || !/^[a-f0-9]{64}$/.test(b.sha256)) throw unavailable();
+        results.push({ status: 'ready', id: tile.id, sha256: b.sha256, bytes: b.bytes, width: b.width,
+          height: b.height, bounds: b.bounds, resolutionMeters: b.resolutionMeters, sources: b.sources ?? [],
+          captureDateMin: b.captureDateMin ?? null, captureDateMax: b.captureDateMax ?? null,
+          datasetVersion: loaded.datasetVersion ?? null, fetchedAt: loaded.fetchedAt ?? null });
+      } catch (error) {
+        const code = error instanceof APIError ? error.code : 'service_unavailable';
+        results.push({ status: code === 'request_pending' ? 'pending' : 'unavailable', id: tile.id, code });
+      }
+    }
+    const status = results.every(t => t.status === 'ready') ? 'ready'
+      : results.some(t => t.status === 'pending') ? 'pending' : 'unavailable';
+    return { status, tiles: results };
+  }
+
   return async function handle(request) {
     try {
       // Native iOS has no Origin. No browser origin, including "null", is accepted.
@@ -180,6 +231,7 @@ export function createHandler({ authenticate, rpc, providers }) {
         throw new APIError(401, 'unauthorized', 'Valid user bearer token required.');
       }
       const operation = await route(request);
+      const cacheOnly = request.headers.get('x-cache-only') === 'true';
       if (operation.kind === 'catalog-search') {
         const page = await rpc('pintheory_catalog_search', {
           p_user_id: user.id,
@@ -195,47 +247,23 @@ export function createHandler({ authenticate, rpc, providers }) {
             || typeof page.datasetVersion !== 'string' || typeof page.hasMore !== 'boolean') throw unavailable();
         return response(page, 200, { 'X-Dataset-Version': page.datasetVersion });
       }
-      const { key, provider, metadata } = operation;
-      const configured = providers.configured?.[provider] === true;
-      const cacheOnly = request.headers.get('x-cache-only') === 'true' || !configured;
-      // Every request, including hits, goes through the SQL account/banned gate.
-      const claim = await rpc('pintheory_data_claim', { p_user_id: user.id, p_key: key,
-        p_provider: provider, p_cache_only: cacheOnly, p_max_age_seconds: operation.maxAge });
-      if (!object(claim)) throw unavailable();
-      if (claim.status === 'HIT') {
-        if (!object(claim.body)) throw unavailable();
-        if (metadata.courseID && await rpc('pintheory_data_tag', { p_key: key, p_course_id: metadata.courseID }) !== true) {
-          throw unavailable();
-        }
-        return send(claim.body, 'HIT', claim.fetchedAt, claim.datasetVersion);
+      if (operation.kind === 'bundle') {
+        const detail = await load(user.id, golfDetail('courses', operation.id), cacheOnly);
+        const coordinates = await load(user.id, golfDetail('coordinates', operation.id), cacheOnly);
+        const terrain = await courseTerrain(user.id, operation.id, coordinates.body);
+        return response({ detail: detail.body, coordinates: coordinates.body, terrain });
       }
-      if (claim.status !== 'CLAIMED') throw claimError(claim, !configured);
-      if (typeof claim.token !== 'string' || !UUID.test(claim.token)) throw unavailable();
-      // Defense in depth if the DB unexpectedly returns CLAIMED for cache-only.
-      if (cacheOnly) {
-        try { await rpc('pintheory_data_fail', { p_key: key, p_token: claim.token,
-          p_provider_wide: false, p_retry_after: 300 }); } catch { /* No dispatch or retry. */ }
-        throw unavailable();
+      if (operation.kind === 'terrain') {
+        const tile = await load(user.id, { provider: 'gpxz', key: `gpxz:raster:v1:${operation.id}`, maxAge: null,
+          metadata: {}, acquire: () => { throw unavailable(); } }, true);
+        const { storagePath, sha256 } = tile.body;
+        if (typeof storagePath !== 'string' || storagePath !== `${sha256}.pttr`) throw unavailable();
+        const bytes = await storage.download(storagePath, TERRAIN_DOWNLOAD_LIMIT);
+        if (await sha256Hex(bytes) !== sha256) throw unavailable();
+        return new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/octet-stream',
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Content-SHA256': sha256 } });
       }
-      let result;
-      try { result = await operation.acquire(providers); }
-      catch (error) {
-        if (!(error instanceof APIError) || error.ambiguous === true) {
-          // Keep dispatched and all reservations: only an operator may allow another paid send.
-          throw new APIError(503, 'ambiguous_attempt', 'Provider attempt is ambiguous; operator resolution is required.');
-        }
-        try {
-          await rpc('pintheory_data_fail', { p_key: key, p_token: claim.token,
-            p_provider_wide: error.providerWide !== false,
-            p_retry_after: Math.max(300, Math.min(86400, Number.isInteger(error.retryAfter) ? error.retryAfter : 300)) });
-        } catch { throw unavailable(); }
-        throw error;
-      }
-      // Never fail/reclaim/replay after a finish failure: commit outcome may be unknown.
-      const finished = await rpc('pintheory_data_finish', { p_key: key, p_token: claim.token,
-        p_body: result.body, p_dataset_version: result.datasetVersion ?? null, p_metadata: metadata });
-      if (finished !== true) throw new APIError(503, 'cache_write_rejected', 'Provider result could not be committed.');
-      return send(result.body, 'MISS', new Date().toISOString(), result.datasetVersion);
+      return send(await load(user.id, operation, cacheOnly));
     } catch (error) {
       const known = error instanceof APIError;
       return response({ error: { code: known ? error.code : 'service_unavailable',

@@ -1,6 +1,9 @@
 import { APIError } from './errors.js';
-import { distance, pointAt, validPoint } from './geometry.js';
-import { readText, cancelBody, withDeadline } from './web.js';
+import { decodeTiff } from './tiff.js';
+import { validPoint } from './geometry.js';
+import { readBytes, readText, cancelBody, withDeadline } from './web.js';
+
+const RASTER_BYTES_LIMIT = 60_000_000;
 
 const invalid = () => {
   const error = new APIError(502, 'invalid_provider_response', 'Provider returned invalid data.');
@@ -39,19 +42,23 @@ export function validateGolf(body, kind, id) {
   return data;
 }
 
-export function validateElevation(body, profile) {
-  if (!object(body) || typeof body.status !== 'string' || body.status.toUpperCase() !== 'OK'
-      || !Array.isArray(body.results) || body.results.length !== profile.samples) invalid();
-  const tolerance = Math.min(Math.max(0.5, profile.length * 0.00001), profile.length / (profile.samples - 1) * 0.4);
-  body.results.forEach((result, i) => {
-    if (!object(result) || !validPoint(result) || !Number.isFinite(result.elevation)
-        || !Number.isFinite(result.resolution) || result.resolution <= 0
-        || typeof result.data_source !== 'string' || !result.data_source.trim()
-        || distance(result, pointAt(profile, i * profile.length / (profile.samples - 1))) > tolerance) invalid();
-    if ((i === 0 || i === profile.samples - 1)
-        && distance(result, i === 0 ? profile.path[0] : profile.path.at(-1)) > 0.02) invalid();
-  });
-  return body;
+/** Exact requested size/bounds, finite plausible heights; GPXZ never returns gaps. */
+export function validateRaster(raster, tile) {
+  if (raster.width !== tile.width || raster.height !== tile.height) invalid();
+  const [, , , x, y] = raster.tiepoint ?? [];
+  const [sx, sy] = raster.pixelScale ?? [];
+  if (![x, y, sx, sy].every(Number.isFinite) || sx <= 0 || sy <= 0
+      || Math.abs(x - tile.left) > sx || Math.abs(y - tile.top) > sy
+      || Math.abs(sx * tile.width - (tile.right - tile.left)) > sx
+      || Math.abs(sy * tile.height - (tile.top - tile.bottom)) > sy) invalid();
+  for (const value of raster.data) {
+    if (!Number.isFinite(value) || value < -500 || value > 9000 || value === raster.nodata) invalid();
+  }
+  const date = name => {
+    const match = new RegExp(`<Item name="${name}"[^>]*>([^<]{0,40})</Item>`).exec(raster.metadata ?? '');
+    return match && /^\d{4}-\d\d-\d\d$/.test(match[1]) ? match[1] : null;
+  };
+  return { captureDateMin: date('gpxz-capture-date-min'), captureDateMax: date('gpxz-capture-date-max') };
 }
 
 export class Providers {
@@ -64,7 +71,7 @@ export class Providers {
       [name, typeof config.providers?.[name]?.key === 'string' && !!config.providers[name].key.trim()]));
   }
 
-  async request(url, options) {
+  async request(url, options, binaryLimit = null) {
     try {
       return await withDeadline(this.timeoutMs, async signal => {
         const response = await this.fetch(url, { ...options, redirect: 'error', signal });
@@ -80,12 +87,17 @@ export class Providers {
           error.providerWide = [401, 403, 429].includes(response.status) || response.status >= 500;
           throw error;
         }
-        if (Number(response.headers.get('content-length')) > 4000000) {
+        if (Number(response.headers.get('content-length')) > (binaryLimit ?? 4000000)) {
           cancelBody(response); throw new Error('Body too large');
         }
-        const body = JSON.parse(await readText(response.body, 4000000, signal));
         const version = response.headers.get('x-dataset-version');
-        return { body, datasetVersion: version && /^[\x20-\x7e]{1,200}$/.test(version) ? version : null };
+        const datasetVersion = version && /^[\x20-\x7e]{1,200}$/.test(version) ? version : null;
+        if (binaryLimit) {
+          const sources = (response.headers.get('x-data-sources') ?? '').split(',')
+            .map(source => source.trim()).filter(source => /^[A-Za-z0-9_.-]{1,100}$/.test(source)).slice(0, 50);
+          return { body: await readBytes(response.body, binaryLimit, signal), datasetVersion, sources };
+        }
+        return { body: JSON.parse(await readText(response.body, 4000000, signal)), datasetVersion };
       });
     } catch (error) {
       if (error instanceof APIError) throw error;
@@ -106,16 +118,18 @@ export class Providers {
     return { ...result, body: validateGolf(result.body, kind, id) };
   }
 
-  async elevation(profile) {
+  async elevationRaster(tile) {
     if (!this.configured.gpxz) throw new APIError(503, 'provider_not_configured', 'Provider is not configured.');
-    const form = new URLSearchParams({
-      latlons: profile.path.map(p => `${p.lat},${p.lon}`).join('|'), samples: String(profile.samples),
-      interpolation: 'bilinear', bathymetry: 'false'
-    });
-    const result = await this.request('https://api.gpxz.io/v1/elevation/sample', {
-      method: 'POST', headers: { 'x-api-key': this.config.providers.gpxz.key,
-        'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString()
-    });
-    return { ...result, body: validateElevation(result.body, profile) };
+    const url = new URL('https://api.gpxz.io/v1/elevation/raster');
+    for (const [key, value] of Object.entries({ bbox_left: tile.left, bbox_right: tile.right,
+      bbox_bottom: tile.bottom, bbox_top: tile.top, width_px: tile.width, height_px: tile.height,
+      bathymetry: 'false' })) url.searchParams.set(key, String(value));
+    const result = await this.request(url, { headers: {
+      'x-api-key': this.config.providers.gpxz.key, Accept: 'image/tiff'
+    } }, RASTER_BYTES_LIMIT);
+    let raster;
+    try { raster = await decodeTiff(result.body); } catch { invalid(); }
+    return { ...validateRaster(raster, tile), grid: raster.data, sources: result.sources,
+      datasetVersion: result.datasetVersion };
   }
 }
