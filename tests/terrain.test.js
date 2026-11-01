@@ -49,7 +49,7 @@ function lzwEncode(bytes) {
 
 /** Builds a single-band float32 GeoTIFF with the given layout. */
 async function buildTiff({ width, height, values, compression = 1, predictor = 1, tile = 0, little = true,
-  scale = [0.00001, 0.00001, 0], tiepoint = [0, 0, 0, 12, 57, 0], metadata = null, bands = 1 }) {
+  scale = [0.00001, 0.00001, 0], tiepoint = [0, 0, 0, 12, 57, 0], metadata = null, bands = 1, big = false }) {
   const blockWidth = tile || width, blockHeight = tile || height;
   const across = Math.ceil(width / blockWidth), down = Math.ceil(height / blockHeight);
   const blocks = [];
@@ -85,31 +85,46 @@ async function buildTiff({ width, height, values, compression = 1, predictor = 1
   else entries.push([273, 4, [0]], [278, 4, [height]], [279, 4, [blocks[0].length]]);
   if (metadata) entries.push([42112, 2, [...metadata].map(c => c.charCodeAt(0)).concat(0)]);
   entries.sort((a, b) => a[0] - b[0]);
-  const sizes = { 2: 1, 3: 2, 4: 4, 12: 8 };
-  const ifdSize = 2 + entries.length * 12 + 4;
-  let dataOffset = 8 + ifdSize;
+  const sizes = { 2: 1, 3: 2, 4: 4, 12: 8, 16: 8 };
+  // GPXZ returns BigTIFF: 16-byte header, 64-bit counts/offsets, LONG8 block offsets.
+  if (big) for (const entry of entries) if (entry[0] === 324 || entry[0] === 273) entry[1] = 16;
+  const head = big ? 16 : 8, countSize = big ? 8 : 2, entrySize = big ? 20 : 12, inline = big ? 8 : 4;
+  const ifdSize = countSize + entries.length * entrySize + inline;
+  let dataOffset = head + ifdSize;
   const extra = entries.map(([, type, values]) => {
     const bytes = sizes[type] * values.length;
-    if (bytes <= 4) return null;
+    if (bytes <= inline) return null;
     const at = dataOffset; dataOffset += bytes + (bytes % 2); return at;
   });
   const blockOffsets = blocks.map(b => { const at = dataOffset; dataOffset += b.length; return at; });
   const out = new Uint8Array(dataOffset);
   const view = new DataView(out.buffer);
   out.set(little ? [0x49, 0x49] : [0x4d, 0x4d]);
-  view.setUint16(2, 42, little); view.setUint32(4, 8, little); view.setUint16(8, entries.length, little);
+  if (big) {
+    view.setUint16(2, 43, little); view.setUint16(4, 8, little);
+    view.setBigUint64(8, 16n, little); view.setBigUint64(16, BigInt(entries.length), little);
+  } else {
+    view.setUint16(2, 42, little); view.setUint32(4, 8, little); view.setUint16(8, entries.length, little);
+  }
   const put = (type, at, value) => {
     if (type === 2) view.setUint8(at, value);
     else if (type === 3) view.setUint16(at, value, little);
     else if (type === 4) view.setUint32(at, value, little);
+    else if (type === 16) view.setBigUint64(at, BigInt(value), little);
     else view.setFloat64(at, value, little);
   };
   entries.forEach(([tag, type, values], i) => {
-    const entry = 10 + i * 12;
+    const entry = head + countSize + i * entrySize;
     const actual = tag === 324 || tag === 273 ? blockOffsets : values;
-    view.setUint16(entry, tag, little); view.setUint16(entry + 2, type, little); view.setUint32(entry + 4, actual.length, little);
-    const start = extra[i] ?? entry + 8;
-    if (extra[i] !== null) view.setUint32(entry + 8, extra[i], little);
+    view.setUint16(entry, tag, little); view.setUint16(entry + 2, type, little);
+    if (big) view.setBigUint64(entry + 4, BigInt(actual.length), little);
+    else view.setUint32(entry + 4, actual.length, little);
+    const valueAt = entry + (big ? 12 : 8);
+    const start = extra[i] ?? valueAt;
+    if (extra[i] !== null) {
+      if (big) view.setBigUint64(valueAt, BigInt(extra[i]), little);
+      else view.setUint32(valueAt, extra[i], little);
+    }
     actual.forEach((value, j) => put(type, start + j * sizes[type], value));
   });
   blocks.forEach((b, i) => out.set(b, blockOffsets[i]));
@@ -121,7 +136,8 @@ const grid = (width, height) => Float32Array.from({ length: width * height }, (_
 test('TIFF reader decodes strips, tiles, deflate/LZW and the floating-point predictor', async () => {
   const width = 5, height = 4, values = grid(width, height);
   for (const layout of [{}, { little: false }, { compression: 8, predictor: 3, tile: 3 },
-    { compression: 8, predictor: 3, tile: 3, little: false }, { compression: 5 }]) {
+    { compression: 8, predictor: 3, tile: 3, little: false }, { compression: 5 },
+    { big: true, compression: 5, tile: 3 }, { big: true, little: false, compression: 8, predictor: 3 }]) {
     const raster = await decodeTiff(await buildTiff({ width, height, values, metadata: '<GDALMetadata/>', ...layout }));
     assert.equal(raster.width, width); assert.equal(raster.height, height);
     assert.deepEqual(Array.from(raster.data), Array.from(values), JSON.stringify(layout));

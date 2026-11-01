@@ -1,27 +1,35 @@
-// Minimal single-band GeoTIFF reader for GPXZ rasters: classic TIFF, strips or tiles,
+// Minimal single-band GeoTIFF reader for GPXZ rasters: classic TIFF or BigTIFF, strips or tiles,
 // no/LZW/Deflate compression and predictors 1–3. Anything else is rejected.
-const TYPE_SIZES = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 16: 8 };
+const TYPE_SIZES = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 16: 8, 17: 8, 18: 8 };
 const MAX_DIMENSION = 10000;
 
 export class TiffError extends Error {}
 const fail = message => { throw new TiffError(message); };
 
 function readTags(view, little) {
-  if (view.byteLength < 8 || view.getUint16(2, little) !== 42) fail('Not a classic TIFF.');
-  const offset = view.getUint32(4, little);
-  if (offset + 2 > view.byteLength) fail('IFD out of range.');
-  const count = view.getUint16(offset, little);
-  if (offset + 2 + count * 12 > view.byteLength) fail('IFD out of range.');
+  const magic = view.byteLength >= 8 ? view.getUint16(2, little) : 0;
+  const big = magic === 43;
+  if (magic !== 42 && !big) fail('Not a TIFF.');
+  if (big && (view.byteLength < 16 || view.getUint16(4, little) !== 8 || view.getUint16(6, little) !== 0)) {
+    fail('Unsupported BigTIFF.');
+  }
+  const word = at => big ? Number(view.getBigUint64(at, little)) : view.getUint32(at, little);
+  const offset = word(big ? 8 : 4);
+  const countSize = big ? 8 : 2, entrySize = big ? 20 : 12, inline = big ? 8 : 4;
+  if (offset + countSize > view.byteLength) fail('IFD out of range.');
+  const count = big ? Number(view.getBigUint64(offset, little)) : view.getUint16(offset, little);
+  if (offset + countSize + count * entrySize > view.byteLength) fail('IFD out of range.');
   const tags = new Map();
   for (let i = 0; i < count; i++) {
-    const entry = offset + 2 + i * 12;
+    const entry = offset + countSize + i * entrySize;
     const tag = view.getUint16(entry, little);
     const type = view.getUint16(entry + 2, little);
-    const length = view.getUint32(entry + 4, little);
+    const length = word(entry + 4);
     const size = TYPE_SIZES[type];
     if (!size) continue;
     const total = size * length;
-    const start = total <= 4 ? entry + 8 : view.getUint32(entry + 8, little);
+    const valueAt = entry + (big ? 12 : 8);
+    const start = total <= inline ? valueAt : word(valueAt);
     if (length > 10_000_000 || start + total > view.byteLength) fail('Tag out of range.');
     tags.set(tag, { type, length, start });
   }
@@ -43,7 +51,8 @@ function tagValues(view, little, tag) {
       case 9: values[i] = view.getInt32(at, little); break;
       case 11: values[i] = view.getFloat32(at, little); break;
       case 12: values[i] = view.getFloat64(at, little); break;
-      case 16: values[i] = Number(view.getBigUint64(at, little)); break;
+      case 16: case 18: values[i] = Number(view.getBigUint64(at, little)); break;
+      case 17: values[i] = Number(view.getBigInt64(at, little)); break;
       default: fail('Unsupported tag type.');
     }
   }
