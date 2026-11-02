@@ -293,23 +293,28 @@ test('terrain problems never block the course and never retry paid calls', async
   assert.equal(storageDown.calls.some(([name]) => name === 'pintheory_data_finish'), false);
 });
 
-test('terrain download is cache-only, account-gated and checksum-verified', async () => {
+test('terrain download is cache-only, account-gated, rate-limited and checksum-verified', async () => {
   const bytes = new Uint8Array([1, 2, 3]);
   const id = 'a'.repeat(64);
-  const run = async (claim, stored = bytes) => {
+  const run = async (claim, stored = bytes, allowance = { status: 'OK' }) => {
     const calls = [];
     const handler = createHandler({ authenticate: async () => ({ id: UID }),
       providers: { configured: { golf: true, gpxz: true } },
       storage: { async download(path, limit) { calls.push(['download', path, limit]); return stored; } },
-      rpc: async (name, args) => { calls.push([name, args]); return claim; } });
+      rpc: async (name, args) => { calls.push([name, args]); return name === 'pintheory_data_download' ? allowance : claim; } });
     return { res: await handler(request(`/api/v1/golf/terrain/${id}`)), calls };
   };
-  const body = { format: 'pttr-v1', sha256: sha(bytes), storagePath: `${sha(bytes)}.pttr` };
+  const body = { format: 'pttr-v1', sha256: sha(bytes), storagePath: `${sha(bytes)}.pttr`, bytes: bytes.length };
   const ok = await run({ status: 'HIT', body });
   assert.equal(ok.res.status, 200); assert.equal(ok.res.headers.get('content-type'), 'application/octet-stream');
   assert.deepEqual(new Uint8Array(await ok.res.arrayBuffer()), bytes);
   assert.equal(ok.calls[0][1].p_key, `gpxz:raster:v1:${id}`); assert.equal(ok.calls[0][1].p_cache_only, true);
-  assert.equal(ok.calls[1][1], body.storagePath);
+  assert.deepEqual(ok.calls[1], ['pintheory_data_download', { p_user_id: UID, p_bytes: bytes.length }]);
+  assert.equal(ok.calls[2][1], body.storagePath);
+  const limited = await run({ status: 'HIT', body }, bytes, { status: 'RATE_LIMIT', retryAfter: 600 });
+  assert.equal(limited.res.status, 429); assert.equal(limited.res.headers.get('retry-after'), '600');
+  assert.equal(limited.calls.some(([name]) => name === 'download'), false);
+  assert.equal((await run({ status: 'HIT', body: { ...body, bytes: undefined } })).res.status, 503);
   assert.equal((await run({ status: 'HIT', body }, new Uint8Array([9]))).res.status, 503);
   assert.equal((await run({ status: 'CACHE_MISS' })).res.status, 404);
   assert.equal((await run({ status: 'FORBIDDEN' })).res.status, 403);
@@ -410,8 +415,8 @@ test('terrain download route selects the Lantmäteriet cache by path', async () 
   const calls = [];
   const handler = createHandler({ authenticate: async () => ({ id: UID }), providers: { configured: {} },
     storage: { async download() { return bytes; } },
-    rpc: async (name, args) => { calls.push(args); return { status: 'HIT',
-      body: { format: 'pttr-v1', sha256: sha(bytes), storagePath: `${sha(bytes)}.pttr` } }; } });
+    rpc: async (name, args) => { calls.push(args); return name === 'pintheory_data_download' ? { status: 'OK' } : { status: 'HIT',
+      body: { format: 'pttr-v1', sha256: sha(bytes), storagePath: `${sha(bytes)}.pttr`, bytes: bytes.length } }; } });
   assert.equal((await handler(request(`/api/v1/golf/terrain/lm/${'c'.repeat(64)}`))).status, 200);
   assert.deepEqual([calls[0].p_provider, calls[0].p_key], ['lantmateriet', `lm:dtm:v1:${'c'.repeat(64)}`]);
 });

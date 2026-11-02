@@ -40,7 +40,7 @@ begin
                 (api_role='service_role' and r.nspname='public');
         end loop;
     end loop;
-    assert (select pg_catalog.count(*)=7 from pg_catalog.pg_proc p
+    assert (select pg_catalog.count(*)=8 from pg_catalog.pg_proc p
         join pg_catalog.pg_namespace n on n.oid=p.pronamespace
         where n.nspname='public' and p.proname like 'pintheory_data_%');
 end $$;
@@ -56,6 +56,7 @@ begin
         'public.pintheory_data_finish(''golf:v1:detail:A'',null,''{}'')',
         'public.pintheory_data_fail(''golf:v1:detail:A'',null)',
         'public.pintheory_data_tag(''missing'',''A'')',
+        'public.pintheory_data_download(null,1)',
         'public.pintheory_data_admin_assign(''missing'',''A'')',
         'public.pintheory_data_admin_resolve(''missing'',''ALLOW_PAID_RETRY'')',
         'public.pintheory_data_admin_overview()'

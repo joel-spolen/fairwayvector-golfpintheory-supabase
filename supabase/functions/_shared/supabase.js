@@ -3,7 +3,7 @@ import { readBytes, readText, cancelBody, withDeadline } from './web.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RPCS = new Set(['pintheory_data_claim', 'pintheory_data_finish', 'pintheory_data_fail', 'pintheory_data_tag',
-  'pintheory_catalog_search']);
+  'pintheory_data_download', 'pintheory_catalog_search']);
 const TERRAIN_BUCKET = 'course-terrain';
 const TERRAIN_OBJECT = /^[a-f0-9]{64}\.pttr$/;
 const unavailable = () => new APIError(503, 'service_unavailable', 'Data service is temporarily unavailable.');

@@ -270,8 +270,12 @@ export function createHandler({ authenticate, rpc, providers, storage }) {
       if (operation.kind === 'terrain') {
         const tile = await load(user.id, { provider: operation.source.provider, key: `${operation.source.prefix}:${operation.id}`,
           maxAge: null, metadata: {}, acquire: () => { throw unavailable(); } }, true);
-        const { storagePath, sha256 } = tile.body;
-        if (typeof storagePath !== 'string' || storagePath !== `${sha256}.pttr`) throw unavailable();
+        const { storagePath, sha256, bytes: size } = tile.body;
+        if (typeof storagePath !== 'string' || storagePath !== `${sha256}.pttr`
+            || !Number.isSafeInteger(size) || size < 1 || size > TERRAIN_DOWNLOAD_LIMIT) throw unavailable();
+        const allowance = await rpc('pintheory_data_download', { p_user_id: user.id, p_bytes: size });
+        if (!object(allowance)) throw unavailable();
+        if (allowance.status !== 'OK') throw claimError(allowance, false);
         const bytes = await storage.download(storagePath, TERRAIN_DOWNLOAD_LIMIT);
         if (await sha256Hex(bytes) !== sha256) throw unavailable();
         return new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/octet-stream',
