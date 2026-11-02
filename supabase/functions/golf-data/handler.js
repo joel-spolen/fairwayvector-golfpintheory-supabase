@@ -27,10 +27,15 @@ function golfDetail(collection, id) {
     acquire: providers => providers.golf(`/${collection}/${id}`, {}, kind, id) };
 }
 
-function rasterTile(tile, courseID, storage) {
-  return { provider: 'gpxz', key: `gpxz:raster:v1:${tile.id}`, maxAge: null, metadata: { courseID },
+const TERRAIN_SOURCES = {
+  gpxz: { provider: 'gpxz', prefix: 'gpxz:raster:v1', verticalDatum: 'EGM2008' },
+  lantmateriet: { provider: 'lantmateriet', prefix: 'lm:dtm:v1', verticalDatum: 'RH2000' }
+};
+
+function rasterTile(tile, courseID, storage, source, fetchGrid) {
+  return { provider: source.provider, key: `${source.prefix}:${tile.id}`, maxAge: null, metadata: { courseID },
     acquire: async providers => {
-      const raster = await providers.elevationRaster(tile);
+      const raster = await fetchGrid(providers);
       const bounds = { left: tile.left, right: tile.right, bottom: tile.bottom, top: tile.top };
       const packed = await packGrid({ width: tile.width, height: tile.height, data: raster.grid, bounds });
       const storagePath = `${packed.sha256}.pttr`;
@@ -43,7 +48,8 @@ function rasterTile(tile, courseID, storage) {
       }
       return { datasetVersion: raster.datasetVersion, body: { format: 'pttr-v1', sha256: packed.sha256,
         storagePath, bytes: packed.bytes.length, width: tile.width, height: tile.height, bounds,
-        resolutionMeters: RESOLUTION_METERS, sources: raster.sources,
+        resolutionMeters: RESOLUTION_METERS, sources: raster.sources, source: source.provider,
+        verticalDatum: source.verticalDatum,
         captureDateMin: raster.captureDateMin, captureDateMax: raster.captureDateMax } };
     } };
 }
@@ -58,7 +64,7 @@ async function route(request) {
   const catalogSearch = path === '/api/v1/catalog/clubs';
   const detail = /^\/api\/v1\/golf\/(courses|coordinates)\/([A-Za-z0-9_-]{1,100})$/.exec(path);
   const bundle = /^\/api\/v1\/golf\/courses\/([A-Za-z0-9_-]{1,100})\/bundle$/.exec(path);
-  const terrain = /^\/api\/v1\/golf\/terrain\/([a-f0-9]{64})$/.exec(path);
+  const terrain = /^\/api\/v1\/golf\/terrain\/(?:(lm)\/)?([a-f0-9]{64})$/.exec(path);
   if (!search && !catalogSearch && !detail && !bundle && !terrain) throw new APIError(404, 'not_found', 'Route not found.');
   if (request.method !== 'GET') throw new APIError(405, 'method_not_allowed', 'Method not allowed.');
   if (catalogSearch) {
@@ -111,7 +117,7 @@ async function route(request) {
   }
   parameters(url.searchParams, []);
   if (bundle) return { kind: 'bundle', id: bundle[1] };
-  if (terrain) return { kind: 'terrain', id: terrain[1] };
+  if (terrain) return { kind: 'terrain', id: terrain[2], source: terrain[1] ? TERRAIN_SOURCES.lantmateriet : TERRAIN_SOURCES.gpxz };
   return golfDetail(detail[1], detail[2]);
 }
 
@@ -193,18 +199,26 @@ export function createHandler({ authenticate, rpc, providers, storage }) {
   }
 
   // Terrain never blocks the course: each tile reports ready, pending or unavailable.
-  async function courseTerrain(userID, courseID, coordinates) {
+  // Swedish courses use Lantmäteriet's 1 m model wherever it covers the whole tile.
+  async function courseTerrain(userID, courseID, coordinates, country) {
     const bounds = courseBounds(coordinates?.coordinates);
     const tiles = bounds && await terrainTiles(bounds);
     if (!tiles) return { status: 'unavailable', code: bounds ? 'course_too_large' : 'invalid_geometry', tiles: [] };
+    const swedish = typeof country === 'string' && country.trim().toLowerCase() === 'sweden'
+      && providers.configured?.lantmateriet === true;
     const results = [];
     for (const tile of tiles) {
       try {
-        const loaded = await load(userID, rasterTile(tile, courseID, storage), false);
+        const items = swedish ? await providers.lantmaterietItems(tile) : [];
+        const operation = items.length
+          ? rasterTile(tile, courseID, storage, TERRAIN_SOURCES.lantmateriet, p => p.elevationLantmateriet(tile, items))
+          : rasterTile(tile, courseID, storage, TERRAIN_SOURCES.gpxz, p => p.elevationRaster(tile));
+        const loaded = await load(userID, operation, false);
         const b = loaded.body;
         if (b.format !== 'pttr-v1' || !/^[a-f0-9]{64}$/.test(b.sha256)) throw unavailable();
-        results.push({ status: 'ready', id: tile.id, sha256: b.sha256, bytes: b.bytes, width: b.width,
-          height: b.height, bounds: b.bounds, resolutionMeters: b.resolutionMeters, sources: b.sources ?? [],
+        results.push({ status: 'ready', id: tile.id, source: operation.provider, sha256: b.sha256, bytes: b.bytes,
+          width: b.width, height: b.height, bounds: b.bounds, resolutionMeters: b.resolutionMeters,
+          sources: b.sources ?? [], verticalDatum: b.verticalDatum ?? 'EGM2008',
           captureDateMin: b.captureDateMin ?? null, captureDateMax: b.captureDateMax ?? null,
           datasetVersion: loaded.datasetVersion ?? null, fetchedAt: loaded.fetchedAt ?? null });
       } catch (error) {
@@ -250,12 +264,12 @@ export function createHandler({ authenticate, rpc, providers, storage }) {
       if (operation.kind === 'bundle') {
         const detail = await load(user.id, golfDetail('courses', operation.id), cacheOnly);
         const coordinates = await load(user.id, golfDetail('coordinates', operation.id), cacheOnly);
-        const terrain = await courseTerrain(user.id, operation.id, coordinates.body);
+        const terrain = await courseTerrain(user.id, operation.id, coordinates.body, detail.body?.country);
         return response({ detail: detail.body, coordinates: coordinates.body, terrain });
       }
       if (operation.kind === 'terrain') {
-        const tile = await load(user.id, { provider: 'gpxz', key: `gpxz:raster:v1:${operation.id}`, maxAge: null,
-          metadata: {}, acquire: () => { throw unavailable(); } }, true);
+        const tile = await load(user.id, { provider: operation.source.provider, key: `${operation.source.prefix}:${operation.id}`,
+          maxAge: null, metadata: {}, acquire: () => { throw unavailable(); } }, true);
         const { storagePath, sha256 } = tile.body;
         if (typeof storagePath !== 'string' || storagePath !== `${sha256}.pttr`) throw unavailable();
         const bytes = await storage.download(storagePath, TERRAIN_DOWNLOAD_LIMIT);

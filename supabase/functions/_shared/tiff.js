@@ -157,7 +157,8 @@ function sampleReader(format, bits) {
   return readers[`${format}:${bits}`] ?? fail('Unsupported sample format.');
 }
 
-export async function decodeTiff(bytes) {
+/** Image layout from the first IFD; `bytes` may be just the file's leading range (COG header). */
+export function readTiffLayout(bytes) {
   if (!(bytes instanceof Uint8Array) || bytes.length < 8) fail('Not a TIFF.');
   const order = String.fromCharCode(bytes[0], bytes[1]);
   if (order !== 'II' && order !== 'MM') fail('Not a TIFF.');
@@ -175,10 +176,10 @@ export async function decodeTiff(bytes) {
   if (!(width >= 1 && height >= 1 && width <= MAX_DIMENSION && height <= MAX_DIMENSION)) fail('Invalid raster size.');
   if (one(277, 1) !== 1 || one(284, 1) !== 1) fail('Only single-band rasters are supported.');
   const bits = one(258);
-  const read = sampleReader(one(339, 1), bits);
-  const bytesPerSample = bits / 8;
+  const sampleFormat = one(339, 1);
+  const read = sampleReader(sampleFormat, bits);
   const compression = one(259, 1);
-  const predictor = one(317, 1);
+  if (![1, 5, 8, 32946].includes(compression)) fail('Unsupported compression.');
   const tiled = tags.has(322);
   const blockWidth = tiled ? one(322) : width;
   const blockHeight = tiled ? one(323) : Math.min(one(278, height), height);
@@ -186,39 +187,73 @@ export async function decodeTiff(bytes) {
   if (!(blockWidth >= 1 && blockHeight >= 1 && blockWidth <= MAX_DIMENSION && blockHeight <= MAX_DIMENSION)) fail('Invalid block size.');
   const across = Math.ceil(width / blockWidth), down = Math.ceil(height / blockHeight);
   if (!offsets || !counts || offsets.length !== across * down || counts.length !== offsets.length) fail('Invalid block table.');
+  const nodataText = tagText(bytes, tags.get(42113));
+  return {
+    little, width, height, tiled, blockWidth, blockHeight, across, down, offsets, counts, read, compression,
+    sampleFormat, bytesPerSample: bits / 8, predictor: one(317, 1),
+    pixelScale: all(33550), tiepoint: all(33922), metadata: tagText(bytes, tags.get(42112)),
+    nodata: nodataText === null || nodataText.trim() === '' ? null : Number(nodataText)
+  };
+}
 
+/** Rows actually stored in block row `by` (strips are not padded, tiles are). */
+export function blockRows(layout, by) {
+  return layout.tiled ? layout.blockHeight : Math.min(layout.blockHeight, layout.height - by * layout.blockHeight);
+}
+
+/** Float32 + floating-point predictor (Lantmäteriet COGs): byte planes MSB first, straight to bits. */
+function floatPredictorBlock(block, width, rows) {
+  const bits = new Uint32Array(width * rows), rowBytes = width * 4;
+  for (let row = 0; row < rows; row++) {
+    const base = row * rowBytes;
+    for (let i = base + 1; i < base + rowBytes; i++) block[i] += block[i - 1];
+    const p1 = base + width, p2 = p1 + width, p3 = p2 + width, out = row * width;
+    for (let x = 0; x < width; x++) {
+      bits[out + x] = ((block[base + x] << 24) | (block[p1 + x] << 16) | (block[p2 + x] << 8) | block[p3 + x]) >>> 0;
+    }
+  }
+  return new Float32Array(bits.buffer);
+}
+
+/** Decodes one compressed block into blockWidth × rows samples. */
+export async function decodeBlock(layout, raw, rows) {
+  const { blockWidth, bytesPerSample, compression } = layout;
+  const expected = blockWidth * rows * bytesPerSample;
+  let block;
+  if (compression === 1) block = raw.slice();
+  else if (compression === 5) block = decodeLZW(raw, expected);
+  else block = await inflate(raw);
+  if (block.length < expected) fail('Truncated block.');
+  if (layout.predictor === 3 && bytesPerSample === 4 && layout.sampleFormat === 3) {
+    return floatPredictorBlock(block, blockWidth, rows);
+  }
+  const decoded = undoPredictor(block.subarray(0, expected), layout.predictor, blockWidth, rows, bytesPerSample, layout.little);
+  const view = new DataView(decoded.bytes.buffer, decoded.bytes.byteOffset, decoded.bytes.byteLength);
+  const values = new Float32Array(blockWidth * rows);
+  for (let i = 0; i < values.length; i++) values[i] = layout.read(view, i * bytesPerSample, decoded.little);
+  return values;
+}
+
+export async function decodeTiff(bytes) {
+  const layout = readTiffLayout(bytes);
+  const { width, height, blockWidth, blockHeight, across, offsets, counts } = layout;
   const data = new Float32Array(width * height);
   for (let index = 0; index < offsets.length; index++) {
     const bx = index % across, by = Math.floor(index / across);
     const start = offsets[index], length = counts[index];
     if (start + length > bytes.length) fail('Block out of range.');
-    const raw = bytes.subarray(start, start + length);
-    const rows = tiled ? blockHeight : Math.min(blockHeight, height - by * blockHeight);
-    const expected = blockWidth * rows * bytesPerSample;
-    let block;
-    if (compression === 1) block = raw.slice();
-    else if (compression === 5) block = decodeLZW(raw, expected);
-    else if (compression === 8 || compression === 32946) block = await inflate(raw);
-    else fail('Unsupported compression.');
-    if (block.length < expected) fail('Truncated block.');
-    const decoded = undoPredictor(block.subarray(0, expected), predictor, blockWidth, rows, bytesPerSample, little);
-    const blockView = new DataView(decoded.bytes.buffer, decoded.bytes.byteOffset, decoded.bytes.byteLength);
+    const rows = blockRows(layout, by);
+    const values = await decodeBlock(layout, bytes.subarray(start, start + length), rows);
     for (let row = 0; row < rows; row++) {
       const y = by * blockHeight + row;
       if (y >= height) break;
       for (let column = 0; column < blockWidth; column++) {
         const x = bx * blockWidth + column;
         if (x >= width) break;
-        data[y * width + x] = read(blockView, (row * blockWidth + column) * bytesPerSample, decoded.little);
+        data[y * width + x] = values[row * blockWidth + column];
       }
     }
   }
-  const nodataText = tagText(bytes, tags.get(42113));
-  return {
-    width, height, data,
-    pixelScale: all(33550),
-    tiepoint: all(33922),
-    metadata: tagText(bytes, tags.get(42112)),
-    nodata: nodataText === null || nodataText.trim() === '' ? null : Number(nodataText)
-  };
+  return { width, height, data, pixelScale: layout.pixelScale, tiepoint: layout.tiepoint,
+    metadata: layout.metadata, nodata: layout.nodata };
 }

@@ -5,6 +5,7 @@ import { createHandler } from '../supabase/functions/golf-data/handler.js';
 import { Providers } from '../supabase/functions/_shared/providers.js';
 import { decodeTiff, decodeLZW } from '../supabase/functions/_shared/tiff.js';
 import { courseBounds, terrainTiles, packGrid } from '../supabase/functions/_shared/terrain.js';
+import { coveringItems, lantmaterietGrid, toSweref99TM } from '../supabase/functions/_shared/lantmateriet.js';
 
 const UID = '24000002-0000-4000-8000-000000000001';
 const TOKEN = '24000002-0000-4000-8000-000000000002';
@@ -313,4 +314,104 @@ test('terrain download is cache-only, account-gated and checksum-verified', asyn
   assert.equal((await run({ status: 'CACHE_MISS' })).res.status, 404);
   assert.equal((await run({ status: 'FORBIDDEN' })).res.status, 403);
   assert.equal((await run({ status: 'HIT', body: { ...body, storagePath: '../x' } })).res.status, 503);
+});
+
+// SWEREF 99 TM sheet 639_32 corners from Lantmäteriet's STAC geometry (cross-checked with PROJ).
+test('SWEREF 99 TM projection matches Lantmäteriet sheet corners', () => {
+  for (const [lat, lon, east, north] of [[57.61637159471741, 11.986352857012228, 320000, 6390000],
+    [57.70607237387218, 11.978898992365227, 320000, 6400000], [57.620249220767846, 12.1535347738668, 330000, 6390000]]) {
+    const p = toSweref99TM(lat, lon);
+    assert.ok(Math.abs(p.east - east) < 0.05 && Math.abs(p.north - north) < 0.05, JSON.stringify(p));
+  }
+});
+
+const SHEET = { west: 320000, south: 6390000, east: 320064, north: 6390064 };
+const plane = (e, n) => 100 + 0.01 * (e - SHEET.west) + 0.02 * (SHEET.north - n);
+const sheetTiff = () => buildTiff({ width: 64, height: 64, tile: 16, compression: 8, predictor: 3,
+  values: Float32Array.from({ length: 64 * 64 }, (_, i) => plane(SHEET.west + (i % 64) + 0.5, SHEET.north - Math.floor(i / 64) - 0.5)) });
+const stacBody = (sheet = SHEET, href = 'https://dl1.lantmateriet.se/hojd/data/grid/mhm/63_3/m639_32.tif') => ({ features: [{
+  id: '639_32', properties: { start_datetime: '2019-11-29T00:00:00Z', end_datetime: '2026-04-24T00:00:00Z', updated: '2026-09-23T02:00:22Z' },
+  assets: { data: { href, 'proj:bbox': [sheet.west, sheet.south, sheet.east, sheet.north],
+    'proj:transform': [1, 0, sheet.west, 0, -1, sheet.north, 0, 0, 1] } } }] });
+const lmTile = { left: 11.98642, right: 11.98705, bottom: 57.61641, top: 57.61685, width: 30, height: 40, id: 'b'.repeat(64) };
+
+test('STAC coverage requires every tile edge inside a 1 m sheet and validates asset URLs', () => {
+  assert.equal(coveringItems(stacBody(), lmTile).length, 1);
+  assert.deepEqual(coveringItems(stacBody({ ...SHEET, east: 320020 }), lmTile), []);
+  assert.throws(() => coveringItems(stacBody(SHEET, 'https://evil.example/m.tif'), lmTile), { code: 'invalid_provider_response' });
+});
+
+test('Lantmäteriet grid reads only needed COG blocks with Basic auth and resamples onto the tile', async () => {
+  const bytes = await sheetTiff();
+  const ranges = [];
+  const providers = new Providers({ providers: { lantmateriet: { username: 'user@example.se', password: 'påss' } } },
+    { fetchImpl: async (url, options) => {
+      assert.equal(String(url), 'https://dl1.lantmateriet.se/hojd/data/grid/mhm/63_3/m639_32.tif');
+      assert.equal(options.headers.Authorization, `Basic ${Buffer.from('user@example.se:påss').toString('base64')}`);
+      const [, start, end] = /^bytes=(\d+)-(\d+)$/.exec(options.headers.Range).map(Number);
+      ranges.push([start, end]);
+      return new Response(bytes.subarray(start, Math.min(end + 1, bytes.length)), { status: 206 });
+    } });
+  assert.equal(providers.configured.lantmateriet, true);
+  const items = coveringItems(stacBody(), lmTile);
+  // Small fixture: the 128 KB header request returns the whole file, so the length check is relaxed here.
+  const raster = await lantmaterietGrid(lmTile, items, async (href, start, end) => {
+    ranges.push([start, end]);
+    return bytes.subarray(start, Math.min(end + 1, bytes.length));
+  });
+  assert.equal(raster.grid.length, 30 * 40);
+  assert.deepEqual(raster.sources, ['lantmateriet_markhojdmodell']);
+  assert.equal(raster.captureDateMin, '2019-11-29'); assert.equal(raster.datasetVersion, '2026-09-23');
+  for (const [x, y] of [[0, 0], [15, 20], [29, 39]]) {
+    const p = toSweref99TM(lmTile.top - (y + 0.5) * (lmTile.top - lmTile.bottom) / 40,
+      lmTile.left + (x + 0.5) * (lmTile.right - lmTile.left) / 30);
+    assert.ok(Math.abs(raster.grid[y * 30 + x] - plane(p.east, p.north)) < 0.01);
+  }
+  assert.ok(ranges.length < 1 + 16, 'only blocks overlapping the tile are read');
+  await assert.rejects(new Providers({ providers: { lantmateriet: { username: 'u', password: 'p' } } },
+    { fetchImpl: async () => { throw new TypeError('network'); } }).elevationLantmateriet(lmTile, items),
+    { code: 'provider_unavailable', ambiguous: false, providerWide: false });
+});
+
+test('Swedish courses use Lantmäteriet tiles; elsewhere or outside coverage they use GPXZ', async () => {
+  const run = async (country, items) => {
+    const calls = [], sources = [];
+    const handler = createHandler({ authenticate: async () => ({ id: UID }),
+      providers: { configured: { golf: true, gpxz: true, lantmateriet: true },
+        async lantmaterietItems() { return items; },
+        async elevationLantmateriet(t) { sources.push('lm'); return { grid: grid(t.width, t.height), sources: ['lantmateriet_markhojdmodell'] }; },
+        async elevationRaster(t) { sources.push('gpxz'); return { grid: grid(t.width, t.height), sources: ['gpxz_terrain_30m'] }; } },
+      storage: { async upload() {} },
+      rpc: async (name, args) => {
+        calls.push([name, args]);
+        if (name !== 'pintheory_data_claim') return true;
+        if (args.p_key === 'golf:v1:detail:A') return { status: 'HIT', body: { ...detail, country } };
+        if (args.p_key === 'golf:v1:coordinates:A') return { status: 'HIT', body: coordinates };
+        return { status: 'CLAIMED', token: TOKEN };
+      } });
+    const { terrain } = await (await handler(request('/api/v1/golf/courses/A/bundle'))).json();
+    const claim = calls.find(([name, args]) => name === 'pintheory_data_claim' && !args.p_key.startsWith('golf:'))[1];
+    return { terrain, claim, sources, finish: calls.find(([name]) => name === 'pintheory_data_finish')[1] };
+  };
+  const swedish = await run('Sweden', [{ id: '639_32' }]);
+  assert.deepEqual(swedish.sources, ['lm']);
+  assert.equal(swedish.claim.p_provider, 'lantmateriet'); assert.match(swedish.claim.p_key, /^lm:dtm:v1:[a-f0-9]{64}$/);
+  assert.equal(swedish.terrain.tiles[0].source, 'lantmateriet'); assert.equal(swedish.terrain.tiles[0].verticalDatum, 'RH2000');
+  assert.equal(swedish.finish.p_body.verticalDatum, 'RH2000');
+  for (const [country, items] of [['Norway', [{ id: 'x' }]], ['Sweden', []]]) {
+    const other = await run(country, items);
+    assert.deepEqual(other.sources, ['gpxz']); assert.equal(other.claim.p_provider, 'gpxz');
+    assert.equal(other.terrain.tiles[0].verticalDatum, 'EGM2008');
+  }
+});
+
+test('terrain download route selects the Lantmäteriet cache by path', async () => {
+  const bytes = new Uint8Array([4, 5]);
+  const calls = [];
+  const handler = createHandler({ authenticate: async () => ({ id: UID }), providers: { configured: {} },
+    storage: { async download() { return bytes; } },
+    rpc: async (name, args) => { calls.push(args); return { status: 'HIT',
+      body: { format: 'pttr-v1', sha256: sha(bytes), storagePath: `${sha(bytes)}.pttr` } }; } });
+  assert.equal((await handler(request(`/api/v1/golf/terrain/lm/${'c'.repeat(64)}`))).status, 200);
+  assert.deepEqual([calls[0].p_provider, calls[0].p_key], ['lantmateriet', `lm:dtm:v1:${'c'.repeat(64)}`]);
 });

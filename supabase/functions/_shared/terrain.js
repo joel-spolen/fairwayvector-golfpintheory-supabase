@@ -65,7 +65,8 @@ export async function terrainTiles(bounds) {
  */
 export async function packGrid({ width, height, data, bounds }) {
   let min = Infinity, max = -Infinity;
-  for (const value of data) {
+  for (let i = 0; i < data.length; i++) {
+    const value = data[i];
     if (!Number.isFinite(value)) throw invalidRaster();
     if (value < min) min = value;
     if (value > max) max = value;
@@ -73,13 +74,13 @@ export async function packGrid({ width, height, data, bounds }) {
   const scale = max - min <= 655.35 ? 0.01 : max - min <= 6553.5 ? 0.1 : null;
   if (scale === null) throw invalidRaster();
   const body = new Uint8Array(width * height * 2);
-  const view = new DataView(body.buffer);
   for (let y = 0; y < height; y++) {
     let previous = 0;
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
       const quantized = Math.round((data[i] - min) / scale);
-      view.setUint16(i * 2, (quantized - previous) & 0xffff, true);
+      const delta = (quantized - previous) & 0xffff;
+      body[i * 2] = delta & 0xff; body[i * 2 + 1] = delta >>> 8;
       previous = quantized;
     }
   }

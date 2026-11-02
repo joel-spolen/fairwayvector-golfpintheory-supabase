@@ -1,6 +1,7 @@
 import { APIError } from './errors.js';
 import { decodeTiff } from './tiff.js';
 import { validPoint } from './geometry.js';
+import { LANTMATERIET_STAC, coveringItems, lantmaterietGrid } from './lantmateriet.js';
 import { readBytes, readText, cancelBody, withDeadline } from './web.js';
 
 const RASTER_BYTES_LIMIT = 60_000_000;
@@ -69,6 +70,9 @@ export class Providers {
     // DB settings alone enable paid acquisition; this only describes key availability.
     this.configured = Object.fromEntries(['golf', 'gpxz'].map(name =>
       [name, typeof config.providers?.[name]?.key === 'string' && !!config.providers[name].key.trim()]));
+    const lm = config.providers?.lantmateriet;
+    this.configured.lantmateriet = typeof lm?.username === 'string' && !!lm.username.trim()
+      && typeof lm?.password === 'string' && !!lm.password;
   }
 
   async request(url, options, binaryLimit = null) {
@@ -131,5 +135,36 @@ export class Providers {
     try { raster = await decodeTiff(result.body); } catch { invalid(); }
     return { ...validateRaster(raster, tile), grid: raster.data, sources: result.sources,
       datasetVersion: result.datasetVersion };
+  }
+
+  /** Public STAC lookup; [] when Lantmäteriet's 1 m model does not cover the whole tile. */
+  async lantmaterietItems(tile) {
+    const url = new URL(LANTMATERIET_STAC);
+    url.searchParams.set('collections', 'dtm-cog');
+    url.searchParams.set('bbox', [tile.left, tile.bottom, tile.right, tile.top].join(','));
+    url.searchParams.set('limit', '20');
+    const result = await this.request(url, { headers: { Accept: 'application/geo+json' } });
+    return coveringItems(result.body, tile);
+  }
+
+  async elevationLantmateriet(tile, items) {
+    if (!this.configured.lantmateriet) throw new APIError(503, 'provider_not_configured', 'Provider is not configured.');
+    const { username, password } = this.config.providers.lantmateriet;
+    const authorization = `Basic ${btoa(String.fromCharCode(...new TextEncoder().encode(`${username}:${password}`)))}`;
+    try {
+      return await lantmaterietGrid(tile, items, async (href, start, end) => {
+        const result = await this.request(href, { headers: { Authorization: authorization, Range: `bytes=${start}-${end}` } },
+          end - start + 1);
+        if (result.body.length !== end - start + 1) invalid();
+        return result.body;
+      });
+    } catch (error) {
+      if (error instanceof APIError && error.ambiguous !== true) throw error;
+      // Free open data: an interrupted read is retryable after the normal cooldown, not an operator case.
+      const definitive = new APIError(502, 'provider_unavailable', 'Provider could not complete the request.');
+      definitive.ambiguous = false;
+      definitive.providerWide = false;
+      throw definitive;
+    }
   }
 }

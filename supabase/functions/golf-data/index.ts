@@ -9,7 +9,8 @@ const { authenticate, rpc, storage } = createSupabase({
 });
 const providers = new Providers({ providers: {
   golf: { key: Deno.env.get('GOLF_API_KEY') },
-  gpxz: { key: Deno.env.get('GPXZ_API_KEY') }
+  gpxz: { key: Deno.env.get('GPXZ_API_KEY') },
+  lantmateriet: { username: Deno.env.get('LANTMATERIET_USERNAME'), password: Deno.env.get('LANTMATERIET_PASSWORD') }
 } });
 
 Deno.serve(createHandler({ authenticate, rpc, providers, storage }));
