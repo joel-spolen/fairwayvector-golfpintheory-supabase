@@ -94,7 +94,7 @@ begin
                     v_status := 'BUDGET';
                 elsif (select pg_catalog.count(*) from pintheory_data.jobs
                     where state = 'dispatched' and until > v_now and (key like 'osm:%') = v_osm)
-                    >= case when v_osm then 2 else 4 end then
+                    >= (case when v_osm then 2 else 4 end) then
                     v_status := 'RATE_LIMIT';
                     v_retry := 2;
                 else
