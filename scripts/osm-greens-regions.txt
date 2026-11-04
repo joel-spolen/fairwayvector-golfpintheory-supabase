@@ -1,0 +1,19 @@
+# Geofabrik extracts whose OpenStreetMap golf greens are imported monthly: every country where
+# course elevation is 2 m or finer (Lantmäteriet for Sweden, GPXZ 0.5–2 m elsewhere).
+# One path per line, as in https://download.geofabrik.de/<path>-latest.osm.pbf
+europe/sweden
+europe/norway
+europe/denmark
+europe/finland
+europe/estonia
+# England, Scotland and Wales (Northern Ireland is 10 m).
+europe/great-britain
+europe/netherlands
+# Flanders and Brussels are 1 m; Wallonia is 20 m, where green slope stays off.
+europe/belgium
+europe/germany
+europe/france
+europe/switzerland
+north-america/us
+north-america/canada
+australia-oceania/new-zealand

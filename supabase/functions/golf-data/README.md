@@ -56,18 +56,23 @@ stores the manifest. Tiles report `ready`, `pending` or `unavailable` with the
 claim code; terrain problems never fail the course. GET `golf/terrain/:id`
 streams a stored tile after a cache-only claim and SHA-256 check. The former
 per-path `POST elevation/sample` route is removed (old `gpxz:sample` rows remain).
-GET `golf/courses/:id/greens` returns `{ greens: [[{ lat, lon }, ...], ...] }`: every
-OpenStreetMap `golf=green` way in the box around the course's cached green points,
-keyed `osm:greens:v1:<courseID>` and kept until an operator deletes the row (an empty
-list is cached too). The course bundle starts this fetch in the background
-(`EdgeRuntime.waitUntil`) so outlines are usually ready before the app asks; until then
-the route answers `request_pending`. Coordinates are read
-cache-only (no GolfAPI purchase). Both public Overpass servers are asked at once and
-each is retried on its own for up to 110 seconds (busy servers often need 30 s+);
-osm jobs have a 150 s lease, an expired one is simply claimed again, and at most two
-run at once. Failures are definitive and per course (300 s cooldown). The app
-never calls Overpass for greens; it saves the outlines with the course and shows the
-ODbL attribution.
+GET `golf/courses/:id/greens` returns `{ greens: [[{ lat, lon }, ...], ...], covered }`:
+OpenStreetMap greens around the course's cached green points (coordinates are read
+cache-only, so no GolfAPI purchase), answered by `pintheory_osm_greens` from our own
+catalog table `pintheory_data.osm_greens`. No public OpenStreetMap server is asked while
+a player waits. `covered` is false when no imported region contains the course, so the
+app asks again later instead of saving "no greens".
+
+The catalog is filled by `.github/workflows/import-osm-greens.yml` (monthly and on demand):
+for each Geofabrik extract in `scripts/osm-greens-regions.txt` it runs
+`osmium tags-filter … w/golf=green r/golf=green`, exports polygons and loads them with
+`scripts/import-osm-greens.mjs` (batches to `pintheory_osm_greens_import`, then
+`pintheory_osm_greens_finish` removes greens deleted from OpenStreetMap and marks the
+region covered). An empty extract never wipes a region. Needs the `production`
+environment secrets `SUPABASE_PROJECT_REF` and `SUPABASE_SERVICE_ROLE_KEY`. Sweden is
+about 4,100 greens (~3 MB). The app saves the outlines with the course and shows the
+ODbL attribution. The earlier `osm` provider rows/settings from the live-Overpass attempt
+are unused.
 
 Provider transport rejects redirects and bounds the entire request/stream to 30
 seconds and 4000000 bytes (60000000 for rasters). An injectable provider timeout

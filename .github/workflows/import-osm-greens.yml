@@ -1,0 +1,57 @@
+name: Import OpenStreetMap greens
+
+on:
+  schedule:
+    - cron: "17 3 2 * *"
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: Space-separated Geofabrik paths (empty = scripts/osm-greens-regions.txt)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osm-greens-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install osmium
+        run: sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
+      - name: Import regions
+        shell: bash
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          REGIONS: ${{ inputs.regions }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_PROJECT_REF"
+          test -n "$SUPABASE_SERVICE_ROLE_KEY"
+          regions="${REGIONS:-$(grep -v '^#' scripts/osm-greens-regions.txt | xargs)}"
+          # The US extract is ~11 GB; /mnt has far more room than the runner's root disk.
+          work=/mnt/osm-greens
+          sudo mkdir -p "$work" && sudo chown "$(id -u)" "$work"
+          for region in $regions; do
+            echo "::group::$region"
+            # Geofabrik asks for at most one download at a time.
+            curl -fsSL --retry 3 -o "$work/region.osm.pbf" "https://download.geofabrik.de/${region}-latest.osm.pbf"
+            bounds="$(osmium fileinfo -g header.boxes "$work/region.osm.pbf" | head -1)"
+            osmium tags-filter "$work/region.osm.pbf" w/golf=green r/golf=green -o "$work/greens.osm.pbf" --overwrite
+            osmium export "$work/greens.osm.pbf" -f geojsonseq -a type,id --geometry-types=polygon \
+              -o "$work/greens.geojsonseq" --overwrite
+            node scripts/import-osm-greens.mjs "$region" "$work/greens.geojsonseq" "$bounds"
+            rm -f "$work"/*
+            echo "::endgroup::"
+          done

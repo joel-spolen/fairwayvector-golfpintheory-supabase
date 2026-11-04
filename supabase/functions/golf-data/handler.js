@@ -43,17 +43,6 @@ export function greenBounds(coordinates) {
   return Object.fromEntries(Object.entries(bounds).map(([k, v]) => [k, Math.round(v * 1e6) / 1e6]));
 }
 
-// Kept until removed by an operator: outlines rarely change and the public servers are slow.
-function greenOutlines(courseID, coordinates) {
-  return { provider: 'osm', key: `osm:greens:v1:${courseID}`, maxAge: null, metadata: {},
-    acquire: async providers => {
-      const bounds = greenBounds(coordinates?.coordinates);
-      if (!bounds) return { body: { greens: [] } };
-      const result = await providers.greenOutlines(bounds);
-      return { body: { greens: result.greens }, datasetVersion: result.datasetVersion };
-    } };
-}
-
 const TERRAIN_SOURCES = {
   gpxz: { provider: 'gpxz', prefix: 'gpxz:raster:v1', verticalDatum: 'EGM2008' },
   lantmateriet: { provider: 'lantmateriet', prefix: 'lm:dtm:v1', verticalDatum: 'RH2000' }
@@ -184,7 +173,7 @@ function claimError(claim, missingConfig) {
   return own(statuses, claim.status) ? new APIError(...statuses[claim.status]) : unavailable();
 }
 
-export function createHandler({ authenticate, rpc, providers, storage, background }) {
+export function createHandler({ authenticate, rpc, providers, storage }) {
   // Every request, including hits, goes through the SQL account/banned gate.
   async function load(userID, operation, cacheOnlyRequested) {
     const { key, provider, metadata } = operation;
@@ -295,15 +284,24 @@ export function createHandler({ authenticate, rpc, providers, storage, backgroun
       if (operation.kind === 'bundle') {
         const detail = await load(user.id, golfDetail('courses', operation.id), cacheOnly);
         const coordinates = await load(user.id, golfDetail('coordinates', operation.id), cacheOnly);
-        // Fetch the green outlines while the player opens the course, so they are ready by the first green.
-        background?.(load(user.id, greenOutlines(operation.id, coordinates.body), false).catch(() => {}));
         const terrain = await courseTerrain(user.id, operation.id, coordinates.body, detail.body?.country);
         return response({ detail: detail.body, coordinates: coordinates.body, terrain });
       }
       if (operation.kind === 'greens') {
         // The course is already open, so its coordinates are cached; this route never buys GolfAPI data.
         const coordinates = await load(user.id, golfDetail('coordinates', operation.id), true);
-        return send(await load(user.id, greenOutlines(operation.id, coordinates.body), cacheOnly));
+        const bounds = greenBounds(coordinates.body?.coordinates);
+        if (!bounds) return response({ greens: [], covered: false });
+        // Our own monthly OpenStreetMap import: no public server is asked while a player waits.
+        const result = await rpc('pintheory_osm_greens', { p_user_id: user.id, p_min_lat: bounds.bottom,
+          p_min_lon: bounds.left, p_max_lat: bounds.top, p_max_lon: bounds.right });
+        if (!object(result)) throw unavailable();
+        if (result.status !== 'OK') throw claimError(result, false);
+        if (!Array.isArray(result.greens) || typeof result.covered !== 'boolean') throw unavailable();
+        const greens = result.greens.filter(Array.isArray)
+          .map(ring => ring.filter(p => Array.isArray(p) && validPoint({ lat: p[0], lon: p[1] })).map(([lat, lon]) => ({ lat, lon })))
+          .filter(ring => ring.length >= 4);
+        return response({ greens, covered: result.covered });
       }
       if (operation.kind === 'terrain') {
         const tile = await load(user.id, { provider: operation.source.provider, key: `${operation.source.prefix}:${operation.id}`,

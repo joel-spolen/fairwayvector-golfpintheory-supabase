@@ -1,178 +1,123 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHandler, greenBounds } from '../supabase/functions/golf-data/handler.js';
-import { Providers, validateGreens } from '../supabase/functions/_shared/providers.js';
-import { APIError } from '../supabase/functions/_shared/errors.js';
+import { greenRow, parseBounds, importRegion } from '../scripts/import-osm-greens.mjs';
 
 const UID = '24000002-0000-4000-8000-000000000001';
-const TOKEN = '24000002-0000-4000-8000-000000000002';
 const ROOT = 'https://edge.example.invalid/functions/v1/golf-data';
 const originalFetch = globalThis.fetch;
 before(() => { globalThis.fetch = () => { throw new Error('No network allowed'); }; });
 after(() => { globalThis.fetch = originalFetch; });
-const request = (suffix, headers = {}) => new Request(`${ROOT}${suffix}`,
-  { headers: { Authorization: 'Bearer offline-user', ...headers } });
+const request = suffix => new Request(`${ROOT}${suffix}`, { headers: { Authorization: 'Bearer offline-user' } });
 
-const ring = (lat, lon) => [[0, 0], [0, 0.0002], [0.0002, 0.0002], [0, 0]]
-  .map(([dLat, dLon]) => ({ lat: lat + dLat, lon: lon + dLon }));
-const overpass = (elements, extra = {}) => ({ osm3s: { timestamp_osm_base: '2026-11-04T08:00:00Z' }, elements, ...extra });
+const square = (lat, lon) => [[0, 0], [0, 0.0002], [0.0002, 0.0002], [0.0002, 0], [0, 0]]
+  .map(([dLat, dLon]) => [lat + dLat, lon + dLon]);
 const coordinates = { courseID: 'A', coordinates: [
   { poi: 1, hole: 1, location: 2, latitude: 57.62, longitude: 12.0 },
   { poi: 1, hole: 2, location: 2, latitude: 57.625, longitude: 12.01 },
   { poi: 11, hole: 1, latitude: 57.7, longitude: 12.3 }] };
 
-test('Overpass greens keep only complete, valid rings and the data timestamp', () => {
-  const good = ring(57.62, 12.0);
-  const parsed = validateGreens(overpass([
-    { type: 'way', id: 1, geometry: good },
-    { type: 'way', id: 2, geometry: good.slice(0, 3) },
-    { type: 'way', id: 3, geometry: [...good.slice(0, 3), { lat: 91, lon: 0 }] },
-    { type: 'node', id: 4, lat: 57, lon: 12 },
-    { type: 'way', id: 5, geometry: ring(57.621234567891, 12.000000049).map(p => p) }]));
-  assert.equal(parsed.greens.length, 2);
-  assert.deepEqual(parsed.greens[0], good);
-  assert.equal(parsed.greens[1][0].lat, 57.6212346);
-  assert.equal(parsed.datasetVersion, 'osm-2026-11-04T08:00:00Z');
-  assert.throws(() => validateGreens(overpass([], { remark: 'runtime error: timed out' })), { code: 'invalid_provider_response' });
-  assert.throws(() => validateGreens({}), { code: 'invalid_provider_response' });
-});
+function greensFixture({ catalog, coordinatesClaim = { status: 'HIT', body: coordinates } }) {
+  const calls = [];
+  const handler = createHandler({
+    authenticate: async () => ({ id: UID }),
+    providers: { configured: { golf: true, gpxz: true }, async golf() { throw new Error('greens must never buy GolfAPI data'); } },
+    rpc: async (name, args) => {
+      calls.push([name, args]);
+      if (name === 'pintheory_osm_greens') return catalog(args);
+      return name === 'pintheory_data_claim' ? coordinatesClaim : true;
+    } });
+  return { handler, calls };
+}
 
 test('green box covers the green points only, with a margin, and rejects huge spreads', () => {
-  const bounds = greenBounds(coordinates.coordinates);
-  assert.deepEqual(bounds, { bottom: 57.619, top: 57.626, left: 11.998, right: 12.012 });
+  assert.deepEqual(greenBounds(coordinates.coordinates), { bottom: 57.619, top: 57.626, left: 11.998, right: 12.012 });
   assert.equal(greenBounds([]), null);
   assert.equal(greenBounds([{ poi: 1, latitude: 57, longitude: 12 }, { poi: 1, latitude: 57, longitude: 12.5 }]), null);
 });
 
-test('Overpass request asks both servers, takes the first good answer and never reports ambiguity', async () => {
-  const urls = [];
-  const providers = new Providers({ providers: {} }, { fetchImpl: async (url, options) => {
-    urls.push(String(url));
-    assert.equal(options.method, 'POST');
-    assert.match(options.headers['User-Agent'], /^GolfPinTheory\//);
-    assert.match(decodeURIComponent(options.body), /way\["golf"="green"\]\(57\.619,11\.998,57\.626,12\.012\);out geom;$/);
-    if (String(url).includes('kumi')) return new Response('busy', { status: 429 });
-    return new Response(JSON.stringify(overpass([{ type: 'way', geometry: ring(57.62, 12) }])));
-  } });
-  assert.equal(providers.configured.osm, true);
-  const result = await providers.greenOutlines(greenBounds(coordinates.coordinates));
-  assert.equal(result.greens.length, 1);
-  assert.equal(new Set(urls).size, 2);
-
-  const down = new Providers({ providers: {} }, { overpassPauseMs: 5, overpassBudgetMs: 60,
-    fetchImpl: async () => { throw new TypeError('network'); } });
-  await assert.rejects(down.greenOutlines({ bottom: 1, left: 1, top: 2, right: 2 }),
-    { code: 'provider_unavailable', ambiguous: false, providerWide: false, retryAfter: 300 });
-
-  let asked = 0;
-  const hanging = new Promise(() => {});
-  // One server hangs; the other refuses twice, then answers.
-  const busyOnce = new Providers({ providers: {} }, { overpassPauseMs: 1, overpassBudgetMs: 2000, fetchImpl: async url => {
-    if (String(url).includes('kumi')) return hanging;
-    return ++asked <= 2 ? new Response('at capacity', { status: 502 })
-      : new Response(JSON.stringify(overpass([{ type: 'way', geometry: ring(57.62, 12) }])));
-  } });
-  assert.equal((await busyOnce.greenOutlines({ bottom: 1, left: 1, top: 2, right: 2 })).greens.length, 1);
-  assert.equal(asked, 3);
-});
-
-function greensFixture({ osmClaim, greenOutlines, coordinatesClaim = { status: 'HIT', body: coordinates } }) {
-  const calls = [], sends = [];
-  const handler = createHandler({
-    authenticate: async () => ({ id: UID }),
-    providers: { configured: { golf: true, gpxz: true, osm: true },
-      async golf() { throw new Error('greens must never buy GolfAPI data'); },
-      async greenOutlines(bounds) { sends.push(bounds); return greenOutlines(bounds); } },
-    rpc: async (name, args) => {
-      calls.push([name, args]);
-      if (name !== 'pintheory_data_claim') return true;
-      if (args.p_key === 'golf:v1:coordinates:A') return coordinatesClaim;
-      return osmClaim(args);
-    } });
-  return { handler, calls, sends };
-}
-
-test('greens route fetches once per course, keeps the result until removed and serves later hits', async () => {
-  const greens = [ring(57.62, 12.0)];
-  const first = greensFixture({ osmClaim: () => ({ status: 'CLAIMED', token: TOKEN }),
-    greenOutlines: () => ({ greens, datasetVersion: 'osm-2026-11-04T08:00:00Z' }) });
-  const res = await first.handler(request('/api/v1/golf/courses/A/greens'));
+test('greens come from our own catalog around the cached course, never from a provider', async () => {
+  const f = greensFixture({ catalog: () => ({ status: 'OK', covered: true, greens: [square(57.62, 12.0), [[91, 0]]] }) });
+  const res = await f.handler(request('/api/v1/golf/courses/A/greens'));
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { greens });
-  assert.equal(res.headers.get('x-cache'), 'MISS');
-  const [coordinateClaim, osmClaim] = first.calls.filter(([name]) => name === 'pintheory_data_claim').map(([, a]) => a);
+  const body = await res.json();
+  assert.equal(body.covered, true);
+  assert.equal(body.greens.length, 1);
+  assert.deepEqual(body.greens[0][1], { lat: 57.62, lon: 12.0002 });
+  const coordinateClaim = f.calls.find(([name]) => name === 'pintheory_data_claim')[1];
   assert.equal(coordinateClaim.p_cache_only, true);
-  assert.deepEqual([osmClaim.p_key, osmClaim.p_provider, osmClaim.p_cache_only, osmClaim.p_max_age_seconds],
-    ['osm:greens:v1:A', 'osm', false, null]);
-  const finish = first.calls.find(([name]) => name === 'pintheory_data_finish')[1];
-  assert.deepEqual(finish.p_body, { greens }); assert.deepEqual(finish.p_metadata, {});
-  assert.equal(finish.p_dataset_version, 'osm-2026-11-04T08:00:00Z');
-  assert.deepEqual(first.sends, [{ bottom: 57.619, top: 57.626, left: 11.998, right: 12.012 }]);
-
-  const cached = greensFixture({ osmClaim: () => ({ status: 'HIT', body: { greens } }),
-    greenOutlines: () => { throw new Error('cached greens must not refetch'); } });
-  const hit = await cached.handler(request('/api/v1/golf/courses/A/greens'));
-  assert.equal(hit.status, 200); assert.deepEqual(await hit.json(), { greens });
+  assert.deepEqual(f.calls.find(([name]) => name === 'pintheory_osm_greens')[1],
+    { p_user_id: UID, p_min_lat: 57.619, p_min_lon: 11.998, p_max_lat: 57.626, p_max_lon: 12.012 });
 });
 
-test('an unreachable map server reports a retryable, per-course error', async () => {
-  const failing = () => { const e = new APIError(502, 'provider_unavailable', 'x', 300); e.ambiguous = false; e.providerWide = false; throw e; };
-  const none = greensFixture({ greenOutlines: failing, osmClaim: () => ({ status: 'CLAIMED', token: TOKEN }) });
-  const missing = await none.handler(request('/api/v1/golf/courses/A/greens'));
-  assert.equal(missing.status, 502); assert.equal((await missing.json()).error.code, 'provider_unavailable');
-  const fail = none.calls.find(([name]) => name === 'pintheory_data_fail')[1];
-  assert.equal(fail.p_provider_wide, false); assert.equal(fail.p_retry_after, 300);
-
-  const pending = greensFixture({ greenOutlines: failing, osmClaim: () => ({ status: 'PENDING', retryAfter: 1 }) });
-  const busy = await pending.handler(request('/api/v1/golf/courses/A/greens'));
-  assert.equal(busy.status, 503); assert.equal((await busy.json()).error.code, 'request_pending');
-
-  const uncached = greensFixture({ coordinatesClaim: { status: 'CACHE_MISS' }, osmClaim: () => { throw new Error('no'); },
-    greenOutlines: () => { throw new Error('no'); } });
+test('catalog refusals map to the usual errors; an uncached course never reaches the catalog', async () => {
+  const limited = await greensFixture({ catalog: () => ({ status: 'RATE_LIMIT', retryAfter: 60 }) })
+    .handler(request('/api/v1/golf/courses/A/greens'));
+  assert.equal(limited.status, 429);
+  assert.equal((await greensFixture({ catalog: () => ({ status: 'FORBIDDEN' }) })
+    .handler(request('/api/v1/golf/courses/A/greens'))).status, 403);
+  assert.equal((await greensFixture({ catalog: () => ({ status: 'OK' }) })
+    .handler(request('/api/v1/golf/courses/A/greens'))).status, 503);
+  const uncached = greensFixture({ coordinatesClaim: { status: 'CACHE_MISS' }, catalog: () => { throw new Error('no'); } });
   assert.equal((await uncached.handler(request('/api/v1/golf/courses/A/greens'))).status, 404);
-  assert.equal(uncached.sends.length, 0);
+  assert.equal(uncached.calls.some(([name]) => name === 'pintheory_osm_greens'), false);
 });
 
 test('greens route accepts only the strict course ID and no query', async () => {
-  const f = greensFixture({ osmClaim: () => ({ status: 'HIT', body: { greens: [] } }), greenOutlines: () => ({ greens: [] }) });
+  const f = greensFixture({ catalog: () => ({ status: 'OK', covered: true, greens: [] }) });
   for (const suffix of ['/api/v1/golf/courses/A/greens/x', '/api/v1/golf/courses/A%2FB/greens', '/api/v1/golf/courses/A/greens?x=1']) {
     assert.notEqual((await f.handler(request(suffix))).status, 200, suffix);
   }
 });
 
-test('the first course download starts the green outlines in the background without delaying the course', async () => {
-  const detail = { courseID: 'A', courseName: 'Å Links' };
-  const calls = [], started = [];
-  let release;
-  const slow = new Promise(resolve => { release = resolve; });
-  const handler = createHandler({
-    authenticate: async () => ({ id: UID }),
-    background: promise => started.push(promise),
-    providers: { configured: { golf: true, gpxz: false, osm: true },
-      async greenOutlines() { await slow; return { greens: [ring(57.62, 12.0)] }; } },
-    rpc: async (name, args) => {
-      calls.push([name, args]);
-      if (name !== 'pintheory_data_claim') return true;
-      if (args.p_key === 'golf:v1:detail:A') return { status: 'HIT', body: detail };
-      if (args.p_key === 'golf:v1:coordinates:A') return { status: 'HIT', body: coordinates };
-      if (args.p_provider === 'osm') return { status: 'CLAIMED', token: TOKEN };
-      return { status: 'CACHE_MISS' };
-    } });
-  const res = await handler(request('/api/v1/golf/courses/A/bundle'));
-  assert.equal(res.status, 200);
-  assert.equal(started.length, 1);
-  assert.equal(calls.some(([name]) => name === 'pintheory_data_finish'), false, 'the course does not wait for the map servers');
-  release();
-  await started[0];
-  const finish = calls.find(([name]) => name === 'pintheory_data_finish')[1];
-  assert.equal(finish.p_key, 'osm:greens:v1:A'); assert.equal(finish.p_body.greens.length, 1);
+const feature = (type, id, geometry) => ({ type: 'Feature', properties: { '@type': type, '@id': id }, geometry });
+const lonLat = ring => ring.map(([lat, lon]) => [lon, lat]);
 
-  const quiet = createHandler({ authenticate: async () => ({ id: UID }), background: promise => started.push(promise),
-    providers: { configured: { golf: true, osm: true }, async greenOutlines() { throw new Error('offline'); } },
-    rpc: async (name, args) => name !== 'pintheory_data_claim' ? true
-      : args.p_key === 'golf:v1:detail:A' ? { status: 'HIT', body: detail }
-      : args.p_key === 'golf:v1:coordinates:A' ? { status: 'HIT', body: coordinates }
-      : args.p_provider === 'osm' ? { status: 'CLAIMED', token: TOKEN } : { status: 'CACHE_MISS' } });
-  assert.equal((await quiet(request('/api/v1/golf/courses/A/bundle'))).status, 200);
-  await assert.doesNotReject(started[1], 'a failed background fetch never surfaces');
+test('osmium features become catalog rows; whole courses and junk are skipped', () => {
+  const row = greenRow(feature('way', 7, { type: 'Polygon', coordinates: [lonLat(square(57.62, 12.0))] }));
+  assert.deepEqual([row.type, row.id, row.minLat, row.maxLon, row.ring.length], ['way', 7, 57.62, 12.0002, 5]);
+  assert.deepEqual(row.ring[1], [57.62, 12.0002]);
+  const multi = greenRow(feature('relation', 8, { type: 'MultiPolygon', coordinates: [
+    [lonLat(square(57.62, 12.0)).slice(0, 4).concat([lonLat(square(57.62, 12.0))[0]])],
+    [lonLat([[57.63, 12.0], [57.63, 12.0001], [57.6302, 12.0002], [57.6302, 12.0001], [57.6301, 12.0], [57.63, 12.0]])]] }));
+  assert.equal(multi.ring.length, 6);
+  const course = [[57.6, 12.0], [57.6, 12.1], [57.65, 12.1], [57.6, 12.0]];
+  assert.equal(greenRow(feature('way', 9, { type: 'Polygon', coordinates: [lonLat(course)] })), null);
+  assert.equal(greenRow(feature('node', 1, { type: 'Point', coordinates: [12, 57] })), null);
+  assert.deepEqual(parseBounds('(10.5,55.0,24.2,69.1)'), { minLon: 10.5, minLat: 55, maxLon: 24.2, maxLat: 69.1 });
+  assert.throws(() => parseBounds(''));
+});
+
+test('a region import sends batches, then completes the region; an empty extract keeps existing data', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'greens-'));
+  try {
+    const file = join(dir, 'greens.geojsonseq');
+    const lines = Array.from({ length: 501 }, (_, i) =>
+      `\x1e${JSON.stringify(feature('way', i + 1, { type: 'Polygon', coordinates: [lonLat(square(57.62, 12.0))] }))}`);
+    writeFileSync(file, `${lines.join('\n')}\n\x1e{broken\n`);
+    const calls = [];
+    const fetchImpl = async (url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push([String(url).split('/').pop(), body]);
+      assert.equal(options.headers.apikey, 'service-key');
+      return new Response(JSON.stringify(url.endsWith('import') ? body.p_rows.length : 501));
+    };
+    const result = await importRegion({ region: 'europe/sweden', file, bounds: parseBounds('(10,55,24,69)'),
+      projectRef: 'abcdefghijklmnopqrst', serviceKey: 'service-key', fetchImpl, log: () => {} });
+    assert.deepEqual(result, { imported: 501, kept: 501 });
+    assert.deepEqual(calls.map(([name]) => name), ['pintheory_osm_greens_import', 'pintheory_osm_greens_import', 'pintheory_osm_greens_finish']);
+    assert.equal(calls[0][1].p_rows.length, 500);
+    assert.equal(calls[0][1].p_started_at, calls[2][1].p_started_at);
+    assert.deepEqual([calls[2][1].p_min_lat, calls[2][1].p_max_lon], [55, 24]);
+
+    writeFileSync(file, '');
+    const empty = [];
+    await assert.rejects(importRegion({ region: 'europe/sweden', file, bounds: parseBounds('(10,55,24,69)'),
+      projectRef: 'abcdefghijklmnopqrst', serviceKey: 'k', fetchImpl: async url => { empty.push(url); return new Response('0'); },
+      log: () => {} }), /existing data kept/);
+    assert.equal(empty.length, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
