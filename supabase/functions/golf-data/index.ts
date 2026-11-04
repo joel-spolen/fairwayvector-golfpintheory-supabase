@@ -13,4 +13,8 @@ const providers = new Providers({ providers: {
   lantmateriet: { username: Deno.env.get('LANTMATERIET_USERNAME'), password: Deno.env.get('LANTMATERIET_PASSWORD') }
 } });
 
-Deno.serve(createHandler({ authenticate, rpc, providers, storage }));
+// Supabase's runtime keeps the function alive for promises passed to waitUntil after responding.
+const runtime = (globalThis as { EdgeRuntime?: { waitUntil(promise: Promise<unknown>): void } }).EdgeRuntime;
+const background = (promise: Promise<unknown>) => { runtime?.waitUntil(promise); };
+
+Deno.serve(createHandler({ authenticate, rpc, providers, storage, background }));

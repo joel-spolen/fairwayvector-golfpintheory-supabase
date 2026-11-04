@@ -92,7 +92,7 @@ function greensFixture({ osmClaim, greenOutlines, coordinatesClaim = { status: '
   return { handler, calls, sends };
 }
 
-test('greens route fetches once per course, caches for 30 days and serves later hits', async () => {
+test('greens route fetches once per course, keeps the result until removed and serves later hits', async () => {
   const greens = [ring(57.62, 12.0)];
   const first = greensFixture({ osmClaim: () => ({ status: 'CLAIMED', token: TOKEN }),
     greenOutlines: () => ({ greens, datasetVersion: 'osm-2026-11-04T08:00:00Z' }) });
@@ -103,7 +103,7 @@ test('greens route fetches once per course, caches for 30 days and serves later 
   const [coordinateClaim, osmClaim] = first.calls.filter(([name]) => name === 'pintheory_data_claim').map(([, a]) => a);
   assert.equal(coordinateClaim.p_cache_only, true);
   assert.deepEqual([osmClaim.p_key, osmClaim.p_provider, osmClaim.p_cache_only, osmClaim.p_max_age_seconds],
-    ['osm:greens:v1:A', 'osm', false, 2592000]);
+    ['osm:greens:v1:A', 'osm', false, null]);
   const finish = first.calls.find(([name]) => name === 'pintheory_data_finish')[1];
   assert.deepEqual(finish.p_body, { greens }); assert.deepEqual(finish.p_metadata, {});
   assert.equal(finish.p_dataset_version, 'osm-2026-11-04T08:00:00Z');
@@ -115,20 +115,17 @@ test('greens route fetches once per course, caches for 30 days and serves later 
   assert.equal(hit.status, 200); assert.deepEqual(await hit.json(), { greens });
 });
 
-test('an unreachable map server falls back to older outlines, else reports a retryable error', async () => {
-  const stale = { greens: [ring(57.62, 12.0)] };
+test('an unreachable map server reports a retryable, per-course error', async () => {
   const failing = () => { const e = new APIError(502, 'provider_unavailable', 'x', 300); e.ambiguous = false; e.providerWide = false; throw e; };
-  const withStale = greensFixture({ greenOutlines: failing,
-    osmClaim: args => args.p_cache_only ? { status: 'HIT', body: stale } : { status: 'CLAIMED', token: TOKEN } });
-  const res = await withStale.handler(request('/api/v1/golf/courses/A/greens'));
-  assert.equal(res.status, 200); assert.deepEqual(await res.json(), stale);
-  const fail = withStale.calls.find(([name]) => name === 'pintheory_data_fail')[1];
-  assert.equal(fail.p_provider_wide, false); assert.equal(fail.p_retry_after, 300);
-
-  const none = greensFixture({ greenOutlines: failing,
-    osmClaim: args => args.p_cache_only ? { status: 'CACHE_MISS' } : { status: 'CLAIMED', token: TOKEN } });
+  const none = greensFixture({ greenOutlines: failing, osmClaim: () => ({ status: 'CLAIMED', token: TOKEN }) });
   const missing = await none.handler(request('/api/v1/golf/courses/A/greens'));
   assert.equal(missing.status, 502); assert.equal((await missing.json()).error.code, 'provider_unavailable');
+  const fail = none.calls.find(([name]) => name === 'pintheory_data_fail')[1];
+  assert.equal(fail.p_provider_wide, false); assert.equal(fail.p_retry_after, 300);
+
+  const pending = greensFixture({ greenOutlines: failing, osmClaim: () => ({ status: 'PENDING', retryAfter: 1 }) });
+  const busy = await pending.handler(request('/api/v1/golf/courses/A/greens'));
+  assert.equal(busy.status, 503); assert.equal((await busy.json()).error.code, 'request_pending');
 
   const uncached = greensFixture({ coordinatesClaim: { status: 'CACHE_MISS' }, osmClaim: () => { throw new Error('no'); },
     greenOutlines: () => { throw new Error('no'); } });
@@ -141,4 +138,41 @@ test('greens route accepts only the strict course ID and no query', async () => 
   for (const suffix of ['/api/v1/golf/courses/A/greens/x', '/api/v1/golf/courses/A%2FB/greens', '/api/v1/golf/courses/A/greens?x=1']) {
     assert.notEqual((await f.handler(request(suffix))).status, 200, suffix);
   }
+});
+
+test('the first course download starts the green outlines in the background without delaying the course', async () => {
+  const detail = { courseID: 'A', courseName: 'Å Links' };
+  const calls = [], started = [];
+  let release;
+  const slow = new Promise(resolve => { release = resolve; });
+  const handler = createHandler({
+    authenticate: async () => ({ id: UID }),
+    background: promise => started.push(promise),
+    providers: { configured: { golf: true, gpxz: false, osm: true },
+      async greenOutlines() { await slow; return { greens: [ring(57.62, 12.0)] }; } },
+    rpc: async (name, args) => {
+      calls.push([name, args]);
+      if (name !== 'pintheory_data_claim') return true;
+      if (args.p_key === 'golf:v1:detail:A') return { status: 'HIT', body: detail };
+      if (args.p_key === 'golf:v1:coordinates:A') return { status: 'HIT', body: coordinates };
+      if (args.p_provider === 'osm') return { status: 'CLAIMED', token: TOKEN };
+      return { status: 'CACHE_MISS' };
+    } });
+  const res = await handler(request('/api/v1/golf/courses/A/bundle'));
+  assert.equal(res.status, 200);
+  assert.equal(started.length, 1);
+  assert.equal(calls.some(([name]) => name === 'pintheory_data_finish'), false, 'the course does not wait for the map servers');
+  release();
+  await started[0];
+  const finish = calls.find(([name]) => name === 'pintheory_data_finish')[1];
+  assert.equal(finish.p_key, 'osm:greens:v1:A'); assert.equal(finish.p_body.greens.length, 1);
+
+  const quiet = createHandler({ authenticate: async () => ({ id: UID }), background: promise => started.push(promise),
+    providers: { configured: { golf: true, osm: true }, async greenOutlines() { throw new Error('offline'); } },
+    rpc: async (name, args) => name !== 'pintheory_data_claim' ? true
+      : args.p_key === 'golf:v1:detail:A' ? { status: 'HIT', body: detail }
+      : args.p_key === 'golf:v1:coordinates:A' ? { status: 'HIT', body: coordinates }
+      : args.p_provider === 'osm' ? { status: 'CLAIMED', token: TOKEN } : { status: 'CACHE_MISS' } });
+  assert.equal((await quiet(request('/api/v1/golf/courses/A/bundle'))).status, 200);
+  await assert.doesNotReject(started[1], 'a failed background fetch never surfaces');
 });

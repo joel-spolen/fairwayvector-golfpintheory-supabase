@@ -8,7 +8,6 @@ const invalid = () => { throw new APIError(400, 'invalid_request', 'Request reje
 const unavailable = () => new APIError(503, 'service_unavailable', 'Data service is temporarily unavailable.');
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const TERRAIN_DOWNLOAD_LIMIT = 64_000_000;
-const GREENS_MAX_AGE = 30 * 86400;
 
 async function hash(value) {
   return sha256Hex(new TextEncoder().encode(value));
@@ -44,8 +43,9 @@ export function greenBounds(coordinates) {
   return Object.fromEntries(Object.entries(bounds).map(([k, v]) => [k, Math.round(v * 1e6) / 1e6]));
 }
 
+// Kept until removed by an operator: outlines rarely change and the public servers are slow.
 function greenOutlines(courseID, coordinates) {
-  return { provider: 'osm', key: `osm:greens:v1:${courseID}`, maxAge: GREENS_MAX_AGE, metadata: {},
+  return { provider: 'osm', key: `osm:greens:v1:${courseID}`, maxAge: null, metadata: {},
     acquire: async providers => {
       const bounds = greenBounds(coordinates?.coordinates);
       if (!bounds) return { body: { greens: [] } };
@@ -184,7 +184,7 @@ function claimError(claim, missingConfig) {
   return own(statuses, claim.status) ? new APIError(...statuses[claim.status]) : unavailable();
 }
 
-export function createHandler({ authenticate, rpc, providers, storage }) {
+export function createHandler({ authenticate, rpc, providers, storage, background }) {
   // Every request, including hits, goes through the SQL account/banned gate.
   async function load(userID, operation, cacheOnlyRequested) {
     const { key, provider, metadata } = operation;
@@ -295,19 +295,15 @@ export function createHandler({ authenticate, rpc, providers, storage }) {
       if (operation.kind === 'bundle') {
         const detail = await load(user.id, golfDetail('courses', operation.id), cacheOnly);
         const coordinates = await load(user.id, golfDetail('coordinates', operation.id), cacheOnly);
+        // Fetch the green outlines while the player opens the course, so they are ready by the first green.
+        background?.(load(user.id, greenOutlines(operation.id, coordinates.body), false).catch(() => {}));
         const terrain = await courseTerrain(user.id, operation.id, coordinates.body, detail.body?.country);
         return response({ detail: detail.body, coordinates: coordinates.body, terrain });
       }
       if (operation.kind === 'greens') {
         // The course is already open, so its coordinates are cached; this route never buys GolfAPI data.
         const coordinates = await load(user.id, golfDetail('coordinates', operation.id), true);
-        const outlines = greenOutlines(operation.id, coordinates.body);
-        try { return send(await load(user.id, outlines, cacheOnly)); }
-        catch (error) {
-          // Last month's outlines beat none while OpenStreetMap is unreachable.
-          if (cacheOnly || !(error instanceof APIError)) throw error;
-          try { return send(await load(user.id, { ...outlines, maxAge: null }, true)); } catch { throw error; }
-        }
+        return send(await load(user.id, greenOutlines(operation.id, coordinates.body), cacheOnly));
       }
       if (operation.kind === 'terrain') {
         const tile = await load(user.id, { provider: operation.source.provider, key: `${operation.source.prefix}:${operation.id}`,
