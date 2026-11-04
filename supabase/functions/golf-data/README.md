@@ -56,6 +56,14 @@ stores the manifest. Tiles report `ready`, `pending` or `unavailable` with the
 claim code; terrain problems never fail the course. GET `golf/terrain/:id`
 streams a stored tile after a cache-only claim and SHA-256 check. The former
 per-path `POST elevation/sample` route is removed (old `gpxz:sample` rows remain).
+GET `golf/courses/:id/greens` returns `{ greens: [[{ lat, lon }, ...], ...] }`: every
+OpenStreetMap `golf=green` way in the box around the course's cached green points,
+keyed `osm:greens:v1:<courseID>` and refreshed after 30 days. Coordinates are read
+cache-only (no GolfAPI purchase). Both public Overpass servers are asked at once,
+retried within 50 seconds; failures are definitive and per course (300 s cooldown),
+and older cached outlines are served while the servers are unreachable. The app
+never calls Overpass for greens; it shows the ODbL attribution.
+
 Provider transport rejects redirects and bounds the entire request/stream to 30
 seconds and 4000000 bytes (60000000 for rasters). An injectable provider timeout
 is available only for offline tests. Staging enablement is the manual

@@ -5,6 +5,11 @@ import { LANTMATERIET_STAC, coveringItems, lantmaterietGrid } from './lantmateri
 import { readBytes, readText, cancelBody, withDeadline } from './web.js';
 
 const RASTER_BYTES_LIMIT = 60_000_000;
+// Public Overpass servers queue busy requests; both are asked at once and the first answer wins.
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+const OVERPASS_TIMEOUT_MS = 50_000;
+const MAX_GREENS = 500;
+const MAX_GREEN_POINTS = 2000;
 
 const invalid = () => {
   const error = new APIError(502, 'invalid_provider_response', 'Provider returned invalid data.');
@@ -62,22 +67,40 @@ export function validateRaster(raster, tile) {
   return { captureDateMin: date('gpxz-capture-date-min'), captureDateMax: date('gpxz-capture-date-max') };
 }
 
+/** OpenStreetMap `golf=green` ways as closed rings of { lat, lon }; a runtime remark means a partial answer. */
+export function validateGreens(body) {
+  if (!object(body) || !Array.isArray(body.elements) || (typeof body.remark === 'string' && body.remark)) invalid();
+  const greens = [];
+  for (const element of body.elements) {
+    if (!object(element) || element.type !== 'way' || !Array.isArray(element.geometry)) continue;
+    const ring = element.geometry.filter(p => object(p) && validPoint(p))
+      .map(p => ({ lat: Math.round(p.lat * 1e7) / 1e7, lon: Math.round(p.lon * 1e7) / 1e7 }));
+    if (ring.length !== element.geometry.length || ring.length < 4 || ring.length > MAX_GREEN_POINTS) continue;
+    greens.push(ring);
+    if (greens.length === MAX_GREENS) break;
+  }
+  const base = body.osm3s?.timestamp_osm_base;
+  return { greens, datasetVersion: typeof base === 'string' && /^[0-9TZ:.-]{1,40}$/.test(base) ? `osm-${base}` : null };
+}
+
 export class Providers {
-  constructor(config, { fetchImpl = globalThis.fetch, timeoutMs = 30000 } = {}) {
+  constructor(config, { fetchImpl = globalThis.fetch, timeoutMs = 30000, overpassPauseMs = 4000 } = {}) {
     this.config = config;
     this.fetch = fetchImpl;
     this.timeoutMs = timeoutMs;
+    this.overpassPauseMs = overpassPauseMs;
     // DB settings alone enable paid acquisition; this only describes key availability.
     this.configured = Object.fromEntries(['golf', 'gpxz'].map(name =>
       [name, typeof config.providers?.[name]?.key === 'string' && !!config.providers[name].key.trim()]));
     const lm = config.providers?.lantmateriet;
     this.configured.lantmateriet = typeof lm?.username === 'string' && !!lm.username.trim()
       && typeof lm?.password === 'string' && !!lm.password;
+    this.configured.osm = true;
   }
 
-  async request(url, options, binaryLimit = null) {
+  async request(url, options, binaryLimit = null, timeoutMs = this.timeoutMs) {
     try {
-      return await withDeadline(this.timeoutMs, async signal => {
+      return await withDeadline(timeoutMs, async signal => {
         const response = await this.fetch(url, { ...options, redirect: 'error', signal });
         if (signal.aborted || response.redirected) { cancelBody(response); throw new Error('Aborted or redirected'); }
         if (!response.ok) {
@@ -135,6 +158,29 @@ export class Providers {
     try { raster = await decodeTiff(result.body); } catch { invalid(); }
     return { ...validateRaster(raster, tile), grid: raster.data, sources: result.sources,
       datasetVersion: result.datasetVersion };
+  }
+
+  /** Free open data: every failure is definitive and per course, so one slow area never pauses the rest. */
+  async greenOutlines(bounds) {
+    const box = [bounds.bottom, bounds.left, bounds.top, bounds.right].join(',');
+    const body = `data=${encodeURIComponent(`[out:json][timeout:45];way["golf"="green"](${box});out geom;`)}`;
+    const ask = async (endpoint, timeoutMs) => {
+      const result = await this.request(endpoint, { method: 'POST', body, headers: {
+        'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json',
+        'User-Agent': 'GolfPinTheory/1.0 (+https://golfpintheory.com)' } }, null, timeoutMs);
+      return validateGreens(result.body);
+    };
+    // Busy servers usually refuse at once ("at capacity"), so retry within the same time budget.
+    const deadline = Date.now() + OVERPASS_TIMEOUT_MS;
+    for (let round = 0; round < 3 && deadline - Date.now() > 5000; round++) {
+      if (round) await new Promise(resolve => setTimeout(resolve, this.overpassPauseMs));
+      try { return await Promise.any(OVERPASS.map(endpoint => ask(endpoint, deadline - Date.now()))); }
+      catch { /* Try again while time remains. */ }
+    }
+    const error = new APIError(502, 'provider_unavailable', 'Provider could not complete the request.', 300);
+    error.ambiguous = false;
+    error.providerWide = false;
+    throw error;
   }
 
   /** Public STAC lookup; [] when Lantmäteriet's 1 m model does not cover the whole tile. */

@@ -1,5 +1,6 @@
 import { APIError } from '../_shared/errors.js';
 import { courseBounds, packGrid, sha256Hex, terrainTiles, RESOLUTION_METERS } from '../_shared/terrain.js';
+import { validPoint } from '../_shared/geometry.js';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -7,6 +8,7 @@ const invalid = () => { throw new APIError(400, 'invalid_request', 'Request reje
 const unavailable = () => new APIError(503, 'service_unavailable', 'Data service is temporarily unavailable.');
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 const TERRAIN_DOWNLOAD_LIMIT = 64_000_000;
+const GREENS_MAX_AGE = 30 * 86400;
 
 async function hash(value) {
   return sha256Hex(new TextEncoder().encode(value));
@@ -25,6 +27,31 @@ function golfDetail(collection, id) {
   const kind = collection === 'courses' ? 'detail' : 'coordinates';
   return { provider: 'golf', key: `golf:v1:${kind}:${id}`, maxAge: null, metadata: {},
     acquire: providers => providers.golf(`/${collection}/${id}`, {}, kind, id) };
+}
+
+/** Box around the course's green points (poi 1), else every point, plus ~100 m; null when unusable. */
+export function greenBounds(coordinates) {
+  const all = (Array.isArray(coordinates) ? coordinates : [])
+    .map(p => ({ poi: Number(p?.poi), lat: Number(p?.latitude), lon: Number(p?.longitude) }))
+    .filter(validPoint);
+  const greens = all.filter(p => p.poi === 1);
+  const points = greens.length ? greens : all;
+  if (!points.length) return null;
+  const lats = points.map(p => p.lat), lons = points.map(p => p.lon);
+  const bounds = { bottom: Math.min(...lats) - 0.001, top: Math.max(...lats) + 0.001,
+    left: Math.min(...lons) - 0.002, right: Math.max(...lons) + 0.002 };
+  if (bounds.right - bounds.left > 0.2 || bounds.top - bounds.bottom > 0.1) return null;
+  return Object.fromEntries(Object.entries(bounds).map(([k, v]) => [k, Math.round(v * 1e6) / 1e6]));
+}
+
+function greenOutlines(courseID, coordinates) {
+  return { provider: 'osm', key: `osm:greens:v1:${courseID}`, maxAge: GREENS_MAX_AGE, metadata: {},
+    acquire: async providers => {
+      const bounds = greenBounds(coordinates?.coordinates);
+      if (!bounds) return { body: { greens: [] } };
+      const result = await providers.greenOutlines(bounds);
+      return { body: { greens: result.greens }, datasetVersion: result.datasetVersion };
+    } };
 }
 
 const TERRAIN_SOURCES = {
@@ -64,8 +91,11 @@ async function route(request) {
   const catalogSearch = path === '/api/v1/catalog/clubs';
   const detail = /^\/api\/v1\/golf\/(courses|coordinates)\/([A-Za-z0-9_-]{1,100})$/.exec(path);
   const bundle = /^\/api\/v1\/golf\/courses\/([A-Za-z0-9_-]{1,100})\/bundle$/.exec(path);
+  const greens = /^\/api\/v1\/golf\/courses\/([A-Za-z0-9_-]{1,100})\/greens$/.exec(path);
   const terrain = /^\/api\/v1\/golf\/terrain\/(?:(lm)\/)?([a-f0-9]{64})$/.exec(path);
-  if (!search && !catalogSearch && !detail && !bundle && !terrain) throw new APIError(404, 'not_found', 'Route not found.');
+  if (!search && !catalogSearch && !detail && !bundle && !greens && !terrain) {
+    throw new APIError(404, 'not_found', 'Route not found.');
+  }
   if (request.method !== 'GET') throw new APIError(405, 'method_not_allowed', 'Method not allowed.');
   if (catalogSearch) {
     const raw = parameters(url.searchParams, ['q', 'country', 'state', 'countries', 'page', 'pageSize']);
@@ -117,6 +147,7 @@ async function route(request) {
   }
   parameters(url.searchParams, []);
   if (bundle) return { kind: 'bundle', id: bundle[1] };
+  if (greens) return { kind: 'greens', id: greens[1] };
   if (terrain) return { kind: 'terrain', id: terrain[2], source: terrain[1] ? TERRAIN_SOURCES.lantmateriet : TERRAIN_SOURCES.gpxz };
   return golfDetail(detail[1], detail[2]);
 }
@@ -266,6 +297,17 @@ export function createHandler({ authenticate, rpc, providers, storage }) {
         const coordinates = await load(user.id, golfDetail('coordinates', operation.id), cacheOnly);
         const terrain = await courseTerrain(user.id, operation.id, coordinates.body, detail.body?.country);
         return response({ detail: detail.body, coordinates: coordinates.body, terrain });
+      }
+      if (operation.kind === 'greens') {
+        // The course is already open, so its coordinates are cached; this route never buys GolfAPI data.
+        const coordinates = await load(user.id, golfDetail('coordinates', operation.id), true);
+        const outlines = greenOutlines(operation.id, coordinates.body);
+        try { return send(await load(user.id, outlines, cacheOnly)); }
+        catch (error) {
+          // Last month's outlines beat none while OpenStreetMap is unreachable.
+          if (cacheOnly || !(error instanceof APIError)) throw error;
+          try { return send(await load(user.id, { ...outlines, maxAge: null }, true)); } catch { throw error; }
+        }
       }
       if (operation.kind === 'terrain') {
         const tile = await load(user.id, { provider: operation.source.provider, key: `${operation.source.prefix}:${operation.id}`,
