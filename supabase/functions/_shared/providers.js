@@ -5,9 +5,10 @@ import { LANTMATERIET_STAC, coveringItems, lantmaterietGrid } from './lantmateri
 import { readBytes, readText, cancelBody, withDeadline } from './web.js';
 
 const RASTER_BYTES_LIMIT = 60_000_000;
-// Public Overpass servers queue busy requests; both are asked at once and the first answer wins.
+// Public Overpass servers queue busy requests (often 30 s+); both are asked at once and the first answer wins.
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
-const OVERPASS_TIMEOUT_MS = 50_000;
+// Inside the 150 s osm job lease and the Edge Function's 150 s response limit.
+const OVERPASS_TIMEOUT_MS = 110_000;
 const MAX_GREENS = 500;
 const MAX_GREEN_POINTS = 2000;
 
@@ -84,11 +85,13 @@ export function validateGreens(body) {
 }
 
 export class Providers {
-  constructor(config, { fetchImpl = globalThis.fetch, timeoutMs = 30000, overpassPauseMs = 4000 } = {}) {
+  constructor(config, { fetchImpl = globalThis.fetch, timeoutMs = 30000, overpassPauseMs = 5000,
+    overpassBudgetMs = OVERPASS_TIMEOUT_MS } = {}) {
     this.config = config;
     this.fetch = fetchImpl;
     this.timeoutMs = timeoutMs;
     this.overpassPauseMs = overpassPauseMs;
+    this.overpassBudgetMs = overpassBudgetMs;
     // DB settings alone enable paid acquisition; this only describes key availability.
     this.configured = Object.fromEntries(['golf', 'gpxz'].map(name =>
       [name, typeof config.providers?.[name]?.key === 'string' && !!config.providers[name].key.trim()]));
@@ -163,24 +166,34 @@ export class Providers {
   /** Free open data: every failure is definitive and per course, so one slow area never pauses the rest. */
   async greenOutlines(bounds) {
     const box = [bounds.bottom, bounds.left, bounds.top, bounds.right].join(',');
-    const body = `data=${encodeURIComponent(`[out:json][timeout:45];way["golf"="green"](${box});out geom;`)}`;
+    const body = `data=${encodeURIComponent(`[out:json][timeout:100];way["golf"="green"](${box});out geom;`)}`;
     const ask = async (endpoint, timeoutMs) => {
       const result = await this.request(endpoint, { method: 'POST', body, headers: {
         'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json',
         'User-Agent': 'GolfPinTheory/1.0 (+https://golfpintheory.com)' } }, null, timeoutMs);
       return validateGreens(result.body);
     };
-    // Busy servers usually refuse at once ("at capacity"), so retry within the same time budget.
-    const deadline = Date.now() + OVERPASS_TIMEOUT_MS;
-    for (let round = 0; round < 3 && deadline - Date.now() > 5000; round++) {
-      if (round) await new Promise(resolve => setTimeout(resolve, this.overpassPauseMs));
-      try { return await Promise.any(OVERPASS.map(endpoint => ask(endpoint, deadline - Date.now()))); }
-      catch { /* Try again while time remains. */ }
-    }
-    const error = new APIError(502, 'provider_unavailable', 'Provider could not complete the request.', 300);
-    error.ambiguous = false;
-    error.providerWide = false;
-    throw error;
+    // Busy servers usually refuse at once ("at capacity"), so each is retried on its own until the
+    // shared deadline; a server that hangs never holds back retries of the other.
+    const deadline = Date.now() + this.overpassBudgetMs;
+    let answered = false;
+    const keepAsking = async endpoint => {
+      for (;;) {
+        try { return await ask(endpoint, deadline - Date.now()); }
+        catch (error) {
+          if (answered || deadline - Date.now() < this.overpassPauseMs * 2) throw error;
+          await new Promise(resolve => setTimeout(resolve, this.overpassPauseMs));
+          if (answered) throw error;
+        }
+      }
+    };
+    try { return await Promise.any(OVERPASS.map(keepAsking)); }
+    catch {
+      const error = new APIError(502, 'provider_unavailable', 'Provider could not complete the request.', 300);
+      error.ambiguous = false;
+      error.providerWide = false;
+      throw error;
+    } finally { answered = true; }
   }
 
   /** Public STAC lookup; [] when Lantmäteriet's 1 m model does not cover the whole tile. */

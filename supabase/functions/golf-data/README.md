@@ -59,8 +59,10 @@ per-path `POST elevation/sample` route is removed (old `gpxz:sample` rows remain
 GET `golf/courses/:id/greens` returns `{ greens: [[{ lat, lon }, ...], ...] }`: every
 OpenStreetMap `golf=green` way in the box around the course's cached green points,
 keyed `osm:greens:v1:<courseID>` and refreshed after 30 days. Coordinates are read
-cache-only (no GolfAPI purchase). Both public Overpass servers are asked at once,
-retried within 50 seconds; failures are definitive and per course (300 s cooldown),
+cache-only (no GolfAPI purchase). Both public Overpass servers are asked at once and
+each is retried on its own for up to 110 seconds (busy servers often need 30 s+);
+osm jobs have a 150 s lease, an expired one is simply claimed again, and at most two
+run at once. Failures are definitive and per course (300 s cooldown),
 and older cached outlines are served while the servers are unreachable. The app
 never calls Overpass for greens; it shows the ODbL attribution.
 

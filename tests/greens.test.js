@@ -59,16 +59,21 @@ test('Overpass request asks both servers, takes the first good answer and never 
   assert.equal(result.greens.length, 1);
   assert.equal(new Set(urls).size, 2);
 
-  const down = new Providers({ providers: {} }, { overpassPauseMs: 1, fetchImpl: async () => { throw new TypeError('network'); } });
+  const down = new Providers({ providers: {} }, { overpassPauseMs: 5, overpassBudgetMs: 60,
+    fetchImpl: async () => { throw new TypeError('network'); } });
   await assert.rejects(down.greenOutlines({ bottom: 1, left: 1, top: 2, right: 2 }),
     { code: 'provider_unavailable', ambiguous: false, providerWide: false, retryAfter: 300 });
 
   let asked = 0;
-  const busyOnce = new Providers({ providers: {} }, { overpassPauseMs: 1, fetchImpl: async () => ++asked <= 2
-    ? new Response('at capacity', { status: 502 })
-    : new Response(JSON.stringify(overpass([{ type: 'way', geometry: ring(57.62, 12) }]))) });
+  const hanging = new Promise(() => {});
+  // One server hangs; the other refuses twice, then answers.
+  const busyOnce = new Providers({ providers: {} }, { overpassPauseMs: 1, overpassBudgetMs: 2000, fetchImpl: async url => {
+    if (String(url).includes('kumi')) return hanging;
+    return ++asked <= 2 ? new Response('at capacity', { status: 502 })
+      : new Response(JSON.stringify(overpass([{ type: 'way', geometry: ring(57.62, 12) }])));
+  } });
   assert.equal((await busyOnce.greenOutlines({ bottom: 1, left: 1, top: 2, right: 2 })).greens.length, 1);
-  assert.ok(asked >= 3);
+  assert.equal(asked, 3);
 });
 
 function greensFixture({ osmClaim, greenOutlines, coordinatesClaim = { status: 'HIT', body: coordinates } }) {
