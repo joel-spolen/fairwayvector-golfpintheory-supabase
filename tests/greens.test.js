@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHandler, greenBounds } from '../supabase/functions/golf-data/handler.js';
-import { greenRow, parseBounds, importRegion } from '../scripts/import-osm-greens.mjs';
+import { greenRow, parseBounds, importRegion, recoverRegion } from '../scripts/import-osm-greens.mjs';
 
 const UID = '24000002-0000-4000-8000-000000000001';
 const ROOT = 'https://edge.example.invalid/functions/v1/golf-data';
@@ -103,14 +103,17 @@ test('a region import sends batches, then completes the region; an empty extract
       const body = JSON.parse(options.body);
       calls.push([String(url).split('/').pop(), body]);
       assert.equal(options.headers.apikey, 'service-key');
-      return new Response(JSON.stringify(url.endsWith('import') ? body.p_rows.length : 501));
+      const name = String(url).split('/').pop();
+      return new Response(JSON.stringify(name.endsWith('import') ? body.p_rows.length : name.endsWith('cleanup') ? 0 : 501));
     };
     const result = await importRegion({ region: 'europe/sweden', file, bounds: parseBounds('(10,55,24,69)'),
       projectRef: 'abcdefghijklmnopqrst', serviceKey: 'service-key', fetchImpl, log: () => {} });
     assert.deepEqual(result, { imported: 501, kept: 501 });
-    assert.deepEqual(calls.map(([name]) => name), ['pintheory_osm_greens_import', 'pintheory_osm_greens_import', 'pintheory_osm_greens_finish']);
+    assert.deepEqual(calls.map(([name]) => name), ['pintheory_osm_greens_import', 'pintheory_osm_greens_import',
+      'pintheory_osm_greens_finish', 'pintheory_osm_greens_cleanup']);
     assert.equal(calls[0][1].p_rows.length, 500);
     assert.equal(calls[0][1].p_started_at, calls[2][1].p_started_at);
+    assert.equal(calls[2][1].p_greens, 501);
     assert.deepEqual([calls[2][1].p_min_lat, calls[2][1].p_max_lon], [55, 24]);
 
     writeFileSync(file, '');
@@ -119,5 +122,32 @@ test('a region import sends batches, then completes the region; an empty extract
       projectRef: 'abcdefghijklmnopqrst', serviceKey: 'k', fetchImpl: async url => { empty.push(url); return new Response('0'); },
       log: () => {} }), /existing data kept/);
     assert.equal(empty.length, 0);
+
+    let recoveryCall;
+    const recovery = await recoverRegion({ region: 'north-america/us', bounds: parseBounds('(-125,24,-66,49)'),
+      projectRef: 'abcdefghijklmnopqrst', serviceKey: 'service-key', fetchImpl: async (url, options) => {
+        recoveryCall = [url, JSON.parse(options.body)];
+        return new Response(JSON.stringify('2026-11-06T12:00:00+00:00'));
+      }, log: () => {} });
+    assert.deepEqual(recovery, { startedAt: '2026-11-06T12:00:00+00:00' });
+    assert.match(recoveryCall[0], /pintheory_osm_greens_recover$/);
+    assert.equal(recoveryCall[1].p_region, 'north-america/us');
+    assert.equal(recoveryCall[1].p_max_lat, 49);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('import RPC errors expose bounded database diagnostics but never raw response bodies', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'greens-'));
+  try {
+    const file = join(dir, 'greens.geojsonseq');
+    writeFileSync(file, `\x1e${JSON.stringify(feature('way', 1, { type: 'Polygon', coordinates: [lonLat(square(57.62, 12.0))] }))}\n`);
+    await assert.rejects(importRegion({ region: 'europe/sweden', file, bounds: parseBounds('(10,55,24,69)'),
+      projectRef: 'abcdefghijklmnopqrst', serviceKey: 'secret-key', fetchImpl: async () =>
+        new Response(JSON.stringify({ code: '57014', message: 'statement timeout', details: 'bounded detail', secret: 'must-not-appear' }), { status: 500 }),
+      log: () => {} }), error => {
+      assert.match(error.message, /HTTP 500: 57014: statement timeout: bounded detail/);
+      assert.doesNotMatch(error.message, /must-not-appear|secret-key/);
+      return true;
+    });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

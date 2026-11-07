@@ -9,6 +9,19 @@ on:
         description: Space-separated Geofabrik paths (empty = scripts/osm-greens-regions.txt)
         required: false
         default: ""
+      recover_existing:
+        description: Activate the latest already-uploaded legacy import without downloading an extract
+        type: boolean
+        required: false
+        default: false
+      recovery_region:
+        description: Region to recover (normally north-america/us)
+        required: false
+        default: "north-america/us"
+      recovery_bounds:
+        description: Optional exact Geofabrik header.boxes value; leave blank to derive from the small .poly metadata file
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -28,8 +41,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install osmium
+        if: inputs.recover_existing != true
         run: sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
       - name: Import regions
+        if: inputs.recover_existing != true
         shell: bash
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
@@ -55,3 +70,25 @@ jobs:
             rm -f "$work"/*
             echo "::endgroup::"
           done
+      - name: Recover already-uploaded region
+        if: inputs.recover_existing == true
+        shell: bash
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          REGION: ${{ inputs.recovery_region }}
+          BOUNDS: ${{ inputs.recovery_bounds }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_PROJECT_REF"
+          test -n "$SUPABASE_SERVICE_ROLE_KEY"
+          [[ "$REGION" =~ ^[a-z0-9-]+(/[a-z0-9-]+)*$ ]]
+          if [[ -z "$BOUNDS" ]]; then
+            curl -fsSL --retry 3 "https://download.geofabrik.de/${REGION}.poly" -o /tmp/osm-region.poly
+            BOUNDS="$(awk 'NF == 2 && $1 ~ /^-?[0-9.]+$/ && $2 ~ /^-?[0-9.]+$/ {
+              if (!seen++) { minLon=maxLon=$1; minLat=maxLat=$2 }
+              if ($1 < minLon) minLon=$1; if ($1 > maxLon) maxLon=$1
+              if ($2 < minLat) minLat=$2; if ($2 > maxLat) maxLat=$2
+            } END { if (!seen) exit 1; printf "(%s,%s,%s,%s)", minLon,minLat,maxLon,maxLat }' /tmp/osm-region.poly)"
+          fi
+          node scripts/import-osm-greens.mjs --recover "$REGION" "$BOUNDS"

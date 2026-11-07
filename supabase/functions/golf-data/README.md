@@ -66,9 +66,14 @@ app asks again later instead of saving "no greens".
 The catalog is filled by `.github/workflows/import-osm-greens.yml` (monthly and on demand):
 for each Geofabrik extract in `scripts/osm-greens-regions.txt` it runs
 `osmium tags-filter … w/golf=green r/golf=green`, exports polygons and loads them with
-`scripts/import-osm-greens.mjs` (batches to `pintheory_osm_greens_import`, then
-`pintheory_osm_greens_finish` removes greens deleted from OpenStreetMap and marks the
-region covered). An empty extract never wipes a region. Needs the `production`
+`scripts/import-osm-greens.mjs`. Each run is written to a separate staging generation;
+`pintheory_osm_greens_finish` atomically activates it with a small region-marker update,
+so the prior generation remains visible until the import succeeds. Superseded legacy and
+staging rows are removed afterward in bounded cleanup transactions. An empty extract never wipes a region.
+The workflow's `recover_existing` option activates the newest unfinalized legacy run (for
+example, the previously uploaded US batch) without downloading the PBF again; it derives
+region bounds from Geofabrik's small `.poly` metadata unless exact `header.boxes` bounds are
+provided. Needs the `production`
 environment secrets `SUPABASE_PROJECT_REF` and `SUPABASE_SERVICE_ROLE_KEY`. Sweden is
 about 4,100 greens (~3 MB). The app saves the outlines with the course and shows the
 ODbL attribution. The earlier `osm` provider rows/settings from the live-Overpass attempt

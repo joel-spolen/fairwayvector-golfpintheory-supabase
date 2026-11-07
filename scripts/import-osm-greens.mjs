@@ -41,15 +41,24 @@ export async function importRegion({ region, file, bounds, projectRef, serviceKe
   if (!serviceKey) fail('SUPABASE_SERVICE_ROLE_KEY is required.');
   const headers = { apikey: serviceKey, 'Content-Type': 'application/json', Accept: 'application/json',
     ...(serviceKey.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${serviceKey}` }) };
-  // Never print response bodies or keys.
+  // Surface bounded PostgREST diagnostics without echoing credentials or raw bodies.
   const rpc = async (name, body) => {
     const response = await fetchImpl(`https://${projectRef}.supabase.co/rest/v1/rpc/${name}`,
       { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(120000) });
-    if (!response.ok) fail(`${name} failed with HTTP ${response.status}.`);
+    if (!response.ok) {
+      let detail = '';
+      try {
+        const error = await response.json();
+        const safe = value => typeof value === 'string' ? value.replace(/[\r\n\t]/g, ' ').slice(0, 240) : '';
+        detail = [safe(error?.code), safe(error?.message), safe(error?.details)].filter(Boolean).join(': ');
+      } catch { /* A gateway may return a non-JSON error. */ }
+      fail(`${name} failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}.`);
+    }
     return response.json();
   };
 
   const startedAt = new Date().toISOString();
+  log(`${region}: staging generation ${startedAt}`);
   let batch = [], total = 0;
   const lines = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
   for await (const line of lines) {
@@ -62,20 +71,61 @@ export async function importRegion({ region, file, bounds, projectRef, serviceKe
     batch.push(row);
     if (batch.length === BATCH) {
       total += await rpc('pintheory_osm_greens_import', { p_region: region, p_started_at: startedAt, p_rows: batch });
+      log(`${region}: ${total} greens staged`);
       batch = [];
     }
   }
-  if (batch.length) total += await rpc('pintheory_osm_greens_import', { p_region: region, p_started_at: startedAt, p_rows: batch });
+  if (batch.length) {
+    total += await rpc('pintheory_osm_greens_import', { p_region: region, p_started_at: startedAt, p_rows: batch });
+    log(`${region}: ${total} greens staged`);
+  }
   // An empty or broken extract must never wipe the region's existing greens.
   if (total === 0) fail(`No greens found for ${region}; existing data kept.`);
-  const kept = await rpc('pintheory_osm_greens_finish', { p_region: region, p_started_at: startedAt,
+  const kept = await rpc('pintheory_osm_greens_finish', { p_region: region, p_started_at: startedAt, p_greens: total,
     p_min_lat: bounds.minLat, p_min_lon: bounds.minLon, p_max_lat: bounds.maxLat, p_max_lon: bounds.maxLon });
-  log(`${region}: ${total} greens imported, ${kept} in catalog.`);
+  log(`${region}: activated ${kept} greens for generation ${startedAt}.`);
+  try {
+    let removed = 0, deleted;
+    do {
+      deleted = await rpc('pintheory_osm_greens_cleanup', { p_region: region, p_limit: 10000 });
+      removed += deleted;
+    } while (deleted === 10000);
+    if (removed) log(`${region}: cleaned up ${removed} superseded rows.`);
+  } catch (error) {
+    log(`${region}: cleanup deferred; active generation is safe. ${error.message}`);
+  }
   return { imported: total, kept };
 }
 
+export async function recoverRegion({ region, bounds, projectRef, serviceKey, fetchImpl = fetch, log = console.log }) {
+  if (!/^[a-z0-9-]+(\/[a-z0-9-]+)*$/.test(region ?? '')) fail('A Geofabrik region like north-america/us is required.');
+  if (!/^[a-z0-9]{20}$/.test(projectRef ?? '')) fail('SUPABASE_PROJECT_REF is required.');
+  if (!serviceKey) fail('SUPABASE_SERVICE_ROLE_KEY is required.');
+  const headers = { apikey: serviceKey, 'Content-Type': 'application/json', Accept: 'application/json',
+    ...(serviceKey.startsWith('sb_secret_') ? {} : { Authorization: `Bearer ${serviceKey}` }) };
+  const response = await fetchImpl(`https://${projectRef}.supabase.co/rest/v1/rpc/pintheory_osm_greens_recover`,
+    { method: 'POST', headers, body: JSON.stringify({ p_region: region, p_min_lat: bounds.minLat, p_min_lon: bounds.minLon,
+      p_max_lat: bounds.maxLat, p_max_lon: bounds.maxLon }), redirect: 'error', signal: AbortSignal.timeout(120000) });
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const error = await response.json();
+      const safe = value => typeof value === 'string' ? value.replace(/[\r\n\t]/g, ' ').slice(0, 240) : '';
+      detail = [safe(error?.code), safe(error?.message), safe(error?.details)].filter(Boolean).join(': ');
+    } catch { /* A gateway may return a non-JSON error. */ }
+    fail(`pintheory_osm_greens_recover failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}.`);
+  }
+  const startedAt = await response.json();
+  log(`${region}: recovered and activated existing generation ${startedAt}; no extract was downloaded.`);
+  return { startedAt };
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const [region, file, boundsText] = process.argv.slice(2);
-  await importRegion({ region, file, bounds: parseBounds(boundsText),
-    projectRef: process.env.SUPABASE_PROJECT_REF, serviceKey: process.env.SUPABASE_SERVICE_ROLE_KEY });
+  const [first, second, third] = process.argv.slice(2);
+  const credentials = { projectRef: process.env.SUPABASE_PROJECT_REF, serviceKey: process.env.SUPABASE_SERVICE_ROLE_KEY };
+  if (first === '--recover') {
+    await recoverRegion({ region: second, bounds: parseBounds(third), ...credentials });
+  } else {
+    await importRegion({ region: first, file: second, bounds: parseBounds(third), ...credentials });
+  }
 }
