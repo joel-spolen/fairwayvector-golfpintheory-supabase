@@ -4,7 +4,7 @@
     "algorithm": "sha256",
     "copyPolicy": "content copied; whitespace normalized",
     "normalization": "Split UTF-8 text on CRLF or LF, trimEnd each line, join with LF, then trimEnd the complete text. Leading indentation and internal whitespace are preserved.",
-    "hashPolicy": "sha256 records original source bytes at capture; normalizedSha256 verifies normalized source and destination content.",
+    "hashPolicy": "sha256 records original source bytes at capture; normalizedSha256 verifies normalized source content. destinationNormalizedSha256, when present, verifies an intentionally revised destination; otherwise normalizedSha256 verifies both.",
     "files": [
         {
             "source": "backend/migrations/202610190001_sync_foundation.sql",
@@ -70,7 +70,8 @@
             "source": "backend/CONTRACT.md",
             "destination": "docs/sync-contract.md",
             "sha256": "dcc179b276bed45c7e77c172a4b2694a7490f2db89337fa06d64109449358c31",
-            "normalizedSha256": "aac2e7c51328d71240e5324980473775f38418571a7914a089bf30f3e971b78f"
+            "normalizedSha256": "aac2e7c51328d71240e5324980473775f38418571a7914a089bf30f3e971b78f",
+            "destinationNormalizedSha256": "a6269cf8baa7dd09c72b23db6cb8b339dea868a977a7eb31905ff046c9327b28"
         }
     ]
 }
