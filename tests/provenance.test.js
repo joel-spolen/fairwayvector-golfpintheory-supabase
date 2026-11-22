@@ -29,12 +29,19 @@ test('normalization accepts only the documented whitespace differences', () => {
   assert.notEqual(normalize(content.replace('    select 1;\n', '')), content);
 });
 
+test('only the revised sync contract has a separate destination fingerprint', () => {
+  const revised = manifest.files.filter(file => 'destinationNormalizedSha256' in file);
+  assert.deepEqual(revised.map(file => file.destination), ['docs/sync-contract.md']);
+  assert.match(revised[0].destinationNormalizedSha256, /^[a-f0-9]{64}$/);
+  assert.notEqual(revised[0].destinationNormalizedSha256, revised[0].normalizedSha256);
+});
+
 for (const file of manifest.files) {
-  test(`copied content; whitespace normalized: ${file.destination}`, () => {
+  test(`destination content; whitespace normalized: ${file.destination}`, () => {
     assert.match(file.sha256, /^[a-f0-9]{64}$/);
     assert.match(file.normalizedSha256, /^[a-f0-9]{64}$/);
     const destination = normalize(readFileSync(resolve(root, file.destination), 'utf8'));
-    assert.equal(digest(destination), file.normalizedSha256, `copied content changed: ${file.destination}`);
+    assert.equal(digest(destination), file.destinationNormalizedSha256 ?? file.normalizedSha256, `destination content changed: ${file.destination}`);
   });
 }
 
@@ -46,6 +53,8 @@ test('optional comparison with the original iOS repository', {
     const source = normalize(readFileSync(resolve(process.env.LEGACY_SOURCE_ROOT, file.source), 'utf8'));
     const destination = normalize(readFileSync(resolve(root, file.destination), 'utf8'));
     assert.equal(digest(source), file.normalizedSha256, `original content changed: ${file.source}`);
-    assert.equal(destination, source, `incomplete or changed copy: ${file.destination}`);
+    if (!('destinationNormalizedSha256' in file)) {
+      assert.equal(destination, source, `incomplete or changed copy: ${file.destination}`);
+    }
   }
 });
