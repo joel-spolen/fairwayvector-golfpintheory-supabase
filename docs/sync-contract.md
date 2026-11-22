@@ -1,8 +1,10 @@
-# Golf PinTheory sync wire contract v1 — staging validation source
+# Golf PinTheory sync wire contract v1
 
-Status: client DTOs and a forward-only domain-validation migration are implemented
-in source; **the migration is not deployed or database-tested**. Do not enable sync
-for valuable data until the documented disposable-staging sequence passes.
+Status (2026-11-22): the operator confirms cloud sync is deployed and operational
+in the configured environment. This file specifies the source protocol; the live
+deployment ledger and detailed SQL/acceptance results are not recorded here. The
+disposable-staging procedures below remain useful for validating future schema
+changes and do not imply that every listed regression has already passed.
 
 ## Transport and identity
 
@@ -80,9 +82,8 @@ Kinds: `golfer_profile`, `club_profile`, `wedge`, `custom_club`, `custom_course`
   journal writes recursively. Foundation Decimal decoding is not a raw-token
   arbitrary-precision validator for untrusted out-of-contract numbers that may
   already have rounded during decoding; server ingress validation is essential.
-  The initial migration is still undeployed, so no old out-of-domain feed exists
-  to migrate. Any deployed variant needs a forward migration plus history/receipt
-  audit and a recovery plan before this assumption is valid.
+  Any future change to this domain needs a forward migration plus history/receipt
+  audit and a recovery plan before deployment.
   The base migration alone does NOT provide content field allowlisting. The
   forward-only `202610230001_sync_domain_validation.sql` migration adds strict
   per-kind allowlists and field/range checks for the current iOS profile, wedge,

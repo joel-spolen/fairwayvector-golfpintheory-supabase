@@ -20,13 +20,15 @@ Standalone deployment source for account sync, account deletion, service-only
 account metrics and the authenticated shared GolfAPI/GPXZ cache. This repository
 does **not** contain the iOS app or the localhost admin GUI.
 
-**Status: source consolidation, not a deployment.** Original migrations and tests
-are preserved, including historical review/unexecuted comments. Offline source
-tests are not proof of a working hosted installation. No git remote, push, hosted
-project link, remote migration, function deployment or paid-provider call is made
-by creating this scaffold. The iOS repository remains untouched; the sibling
-local-admin-server was separately reduced to a loopback-only Supabase dashboard.
-The app is not switched to this data endpoint by this work.
+**Repository status: source consolidation, not a deployment.** This checkout's
+creation did not link or deploy a hosted project; original migrations and tests
+are preserved, including historical review/unexecuted comments. Separately, the
+operator confirms the app's cloud sync is deployed and operational in the
+configured environment as of 2026-11-22. This repository does not include that
+environment's migration ledger or full acceptance record. Offline source tests
+alone are not proof of hosted behavior. The iOS repository remains separate from
+this backend-source checkout; the sibling local-admin-server is an independent
+loopback-only dashboard.
 
 ## Contents
 

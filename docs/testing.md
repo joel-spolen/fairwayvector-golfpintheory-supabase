@@ -57,12 +57,21 @@ tables or commit setup fixtures. Never disable history triggers to force a pass.
    test correction. This consolidation does not alter historical SQL to work
    around runtime errors.
 
-The scaffold CI intentionally does **not** run disposable SQL yet. A reviewed
-reproducible database harness and recorded full-schema results remain a release
-gate. Do not infer that tests copied here, or previous local experiments outside
-this checkout, passed in a hosted Supabase environment.
+The scaffold CI intentionally does **not** run disposable SQL. This checkout does
+not include a reproducible full-schema test report or the live deployment ledger.
+The operator confirms sync is operational in the configured environment; retain
+actual SQL and hosted acceptance results in the deployment record, and use the
+disposable SQL procedure for future schema changes. Do not infer test outcomes
+from test files or from this source checkout.
 
-## Staging integration before production
+## Staging integration and ongoing acceptance
+
+Cloud sync is operational in the configured environment per operator confirmation
+(2026-11-22). This source checkout does not contain its live deployment ledger or
+the detailed acceptance results. The scenarios below remain the recommended
+regression matrix for future migrations, releases and environment changes; their
+presence here does not mean sync is unavailable or that each scenario is known to
+have failed.
 
 - Real signed user sessions through gateway and independent online user validation;
   missing/expired/wrong-project/anonymous/deleted/blocked user rejection.
